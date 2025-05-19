@@ -1,0 +1,89 @@
+name: Publish Alchemy to GitHub Packages (PR)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  publish-gpr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Set up GitHub CLI
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set package version and delete previous version (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          SCOPED_PACKAGE_NAME="@sam-goodwin/alchemy"
+          VERSION="0.0.0-pr.$PR_NUMBER"
+
+          echo "Target version: $VERSION"
+          echo "Scoped package name: $SCOPED_PACKAGE_NAME"
+
+          URL_ENCODED_SCOPED_NAME=$(echo "$SCOPED_PACKAGE_NAME" | jq -sRr "(. | @uri)")
+
+          # List existing package versions for this package
+          echo "Checking for existing version $VERSION..."
+          EXISTING_VERSION=$(gh api \
+            GET "/orgs/sam-goodwin/packages/npm/$URL_ENCODED_SCOPED_NAME/versions" \
+            --jq ".[] | select(.name == \"$VERSION\") | .id")
+
+          if [ -n "$EXISTING_VERSION" ]; then
+            echo "Existing version $VERSION found with ID: $EXISTING_VERSION"
+            echo "Deleting existing version..."
+            gh api \
+              DELETE "/orgs/sam-goodwin/packages/npm/$URL_ENCODED_SCOPED_NAME/versions/$EXISTING_VERSION" \
+              --silent
+            echo "Previous version deleted."
+          else
+            echo "No existing version $VERSION found. Proceeding with publish."
+          fi
+
+          # Set the new version in package.json
+          echo "Setting package version to $VERSION in ./alchemy/package.json"
+          npm version --no-git-tag-version "$VERSION"
+        working-directory: ./alchemy
+        shell: bash
+
+      - name: Patch package.json for GitHub Packages
+        run: |
+          jq '.name = "@sam-goodwin/alchemy" | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp.json
+          mv package.tmp.json package.json
+        working-directory: ./alchemy
+
+      - name: Publish to GitHub Packages
+        run: |
+          npm publish --access public --registry=https://npm.pkg.github.com
+        working-directory: ./alchemy
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Comment on PR with install instructions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          COMMENT=":package: **Install this PR build:**\n\n\`\`\`sh\n# Add to your .npmrc (if not already present)\n@sam-goodwin:registry=https://npm.pkg.github.com\n\n# Install the PR build\nnpm install @sam-goodwin/alchemy@0.0.0-pr.${PR_NUMBER}\n\`\`\`\n"
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
