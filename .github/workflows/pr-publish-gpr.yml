@@ -1,0 +1,115 @@
+name: Publish Alchemy to GitHub Packages (PR)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  publish-gpr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Detect PR target owner
+        id: pr_target
+        run: |
+          OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+
+      - name: Determine API path for package deletion
+        id: api_path
+        run: |
+          OWNER="${{ steps.pr_target.outputs.owner }}"
+          TYPE=$(gh api "users/$OWNER" --jq '.type')
+          if [ "$TYPE" = "Organization" ]; then
+            echo "api_path=orgs/$OWNER" >> $GITHUB_OUTPUT
+          else
+            echo "api_path=users/$OWNER" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch package.json for GitHub Packages
+        run: |
+          OWNER="${{ steps.pr_target.outputs.owner }}"
+          echo "Using scope: @$OWNER/alchemy"
+          jq --arg owner "$OWNER" '.name = ("@" + $owner + "/alchemy") | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp.json
+          mv package.tmp.json package.json
+        working-directory: ./alchemy
+
+      - name: Set package version and delete previous version (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          OWNER="${{ steps.pr_target.outputs.owner }}"
+          API_PATH="${{ steps.api_path.outputs.api_path }}"
+          SCOPED_PACKAGE_NAME="@$OWNER/alchemy"
+          VERSION="0.0.0-pr.$PR_NUMBER"
+
+          echo "Target version: $VERSION"
+          echo "Scoped package name: $SCOPED_PACKAGE_NAME"
+
+          URL_ENCODED_PACKAGE_NAME=$(printf "%s" "$SCOPED_PACKAGE_NAME" | jq -sRr "@uri")
+
+          # List existing package versions for this package
+          echo "Checking for existing version $VERSION..."
+          set +e
+          VERSIONS_JSON=$(gh api "/$API_PATH/packages/npm/$URL_ENCODED_PACKAGE_NAME/versions" 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            EXISTING_VERSION=$(echo "$VERSIONS_JSON" | jq -r ".[] | select(.name == \"$VERSION\") | .id")
+          elif echo "$VERSIONS_JSON" | grep -q "Package not found"; then
+            EXISTING_VERSION=""
+          else
+            echo "Error checking for existing version: $VERSIONS_JSON"
+            exit $EXIT_CODE
+          fi
+
+          if [ -n "$EXISTING_VERSION" ]; then
+            echo "Existing version $VERSION found with ID: $EXISTING_VERSION"
+            echo "Deleting existing version..."
+            gh api --method DELETE "/$API_PATH/packages/npm/$URL_ENCODED_PACKAGE_NAME/versions/$EXISTING_VERSION" --silent
+            echo "Previous version deleted."
+          else
+            echo "No existing version $VERSION found. Proceeding with publish."
+          fi
+
+          # Set the new version in package.json
+          echo "Setting package version to $VERSION in ./alchemy/package.json"
+          npm version --no-git-tag-version "$VERSION"
+        working-directory: ./alchemy
+        shell: bash
+
+      - name: Publish to GitHub Packages
+        run: |
+          npm publish --access public --registry=https://npm.pkg.github.com
+        working-directory: ./alchemy
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Comment on PR with install instructions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          OWNER="${{ steps.pr_target.outputs.owner }}"
+          COMMENT=":package: **Install this PR build:**\n\n\`\`\`sh\n# Add to your .npmrc (if not already present)\n@$OWNER:registry=https://npm.pkg.github.com\n\n# Install the PR build\nnpm install @$OWNER/alchemy@0.0.0-pr.${PR_NUMBER}\n\`\`\`\n"
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
