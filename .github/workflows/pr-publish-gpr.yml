@@ -28,6 +28,9 @@ jobs:
           registry-url: "https://npm.pkg.github.com"
           scope: "@${{ github.event.pull_request.base.repo.owner.login }}"
 
+      - name: Install TypeScript
+        run: npm install -g typescript
+
       - name: Install dependencies
         run: bun install
 
@@ -109,6 +112,21 @@ jobs:
           bun x json -I -f package.json -e "this.version='$VERSION'"
         working-directory: ./alchemy
         shell: bash
+
+      - name: Debug Output
+        run: |
+          echo "============ DEBUG INFO ============"
+          echo "Current directory: $(pwd)"
+          echo "Files in current dir: $(ls -la)"
+          echo "Files in lib dir (if exists): $(ls -la lib 2>/dev/null || echo 'lib directory not found')"
+          echo "Package.json content:"
+          cat package.json
+          echo "TypeScript installation: $(which tsc || echo 'tsc not found')"
+          echo "tsc version: $(tsc --version 2>/dev/null || echo 'tsc version check failed')"
+          echo "PATH: $PATH"
+          echo "Node version: $(node --version 2>/dev/null || echo 'node not found')"
+          echo "====================================="
+        working-directory: ./alchemy
 
       - name: Publish to GitHub Packages
         run: |
