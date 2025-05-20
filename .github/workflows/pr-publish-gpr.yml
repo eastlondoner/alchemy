@@ -137,21 +137,9 @@ jobs:
           # Verify package before publishing
           ../.github/actions/verify-package.sh
 
-          # Try to publish with bun first
-          echo "Attempting to publish with bun..."
-          if ! bun publish --access public --registry=https://npm.pkg.github.com --no-git-checks; then
-            echo "Bun publish failed, trying with npm..."
-            
-            # Fallback to npm if bun fails
-            npm publish --access public --registry=https://npm.pkg.github.com
-            
-            # Check if npm publish succeeded
-            if [ $? -ne 0 ]; then
-              echo "Publishing failed with both bun and npm"
-              cat .npm/_logs/*.log || true
-              exit 1
-            fi
-          fi
+          # Publish with Bun only (no npm fallback)
+          echo "Publishing with Bun..."
+          bun publish --access public --registry=https://npm.pkg.github.com --no-git-checks
         working-directory: ./alchemy
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
