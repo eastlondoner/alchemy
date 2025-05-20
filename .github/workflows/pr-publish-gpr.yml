@@ -47,8 +47,14 @@ jobs:
         run: |
           OWNER="${{ steps.pr_target.outputs.owner }}"
           echo "Using scope: @$OWNER/alchemy"
-          jq --arg owner "$OWNER" '.name = ("@" + $owner + "/alchemy") | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.tmp.json
-          mv package.tmp.json package.json
+
+          # Modify package name and add publishConfig for GitHub Packages
+          jq --arg owner "$OWNER" '.name = ("@" + $owner + "/alchemy") | .publishConfig = {"registry": "https://npm.pkg.github.com"}' package.json > package.json.new
+          mv package.json.new package.json
+
+          # Log the result for debugging
+          echo "Modified package.json name and publishConfig:"
+          cat package.json | jq '.name, .publishConfig'
         working-directory: ./alchemy
 
       - name: Set package version and delete previous version (if exists)
@@ -93,13 +99,14 @@ jobs:
 
           # Set the new version in package.json
           echo "Setting package version to $VERSION in ./alchemy/package.json"
-          npm version --no-git-tag-version "$VERSION"
+          bun x json -I -f package.json -e "this.version='$VERSION'"
         working-directory: ./alchemy
         shell: bash
 
       - name: Publish to GitHub Packages
         run: |
-          npm publish --access public --registry=https://npm.pkg.github.com
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
+          bun publish --access public --registry=https://npm.pkg.github.com --no-git-checks
         working-directory: ./alchemy
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
