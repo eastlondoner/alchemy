@@ -16,15 +16,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js (fallback)
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
           registry-url: "https://npm.pkg.github.com"
           scope: "@${{ github.event.pull_request.base.repo.owner.login }}"
 
       - name: Install dependencies
-        run: npm install
+        run: bun install
         working-directory: ./alchemy
 
       - name: Detect PR target owner
@@ -101,50 +106,52 @@ jobs:
           fi
 
           # Set the new version in package.json
-          echo "Setting package version to $VERSION in package.json"
-          npm version $VERSION --no-git-tag-version
-          cat package.json | jq '.version'
+          echo "Setting package version to $VERSION in ./alchemy/package.json"
+          bun x json -I -f package.json -e "this.version='$VERSION'"
         working-directory: ./alchemy
         shell: bash
 
-      - name: Debug output
+      - name: Debug Output
         run: |
           echo "============ DEBUG INFO ============"
           echo "Current directory: $(pwd)"
           echo "Files in current dir: $(ls -la)"
+          echo "Files in lib dir (if exists): $(ls -la lib 2>/dev/null || echo 'lib directory not found')"
           echo "Package.json content:"
           cat package.json
-          echo "Node version: $(node --version)"
-          echo "NPM version: $(npm --version)"
+          echo "TypeScript installation: $(which tsc || echo 'tsc not found')"
+          echo "tsc version: $(tsc --version 2>/dev/null || echo 'tsc version check failed')"
+          echo "PATH: $PATH"
+          echo "Node version: $(node --version 2>/dev/null || echo 'node not found')"
           echo "====================================="
         working-directory: ./alchemy
 
-      - name: Build and publish to GitHub Packages
+      - name: Publish to GitHub Packages
         run: |
-          # Create .npmrc file
           echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
           echo "@${{ steps.pr_target.outputs.owner }}:registry=https://npm.pkg.github.com" >> .npmrc
 
-          # Copy README from the root for publishing
-          cp ../README.md .
+          # Build the package
+          ../.github/actions/build-package.sh
 
-          # Clean up previous build artifacts
-          rm -rf ./*.tsbuildinfo
-          rm -rf ./lib
+          # Verify package before publishing
+          ../.github/actions/verify-package.sh
 
-          # Build TypeScript
-          echo "Building TypeScript..."
-          npx tsc -b
-
-          # Verify build output
-          echo "Checking build output..."
-          ls -la lib || { echo "Build failed - no lib directory"; exit 1; }
-
-          # Publish to GitHub Packages
-          echo "Publishing package..."
-          npm publish --access public
-
-          echo "Package published successfully"
+          # Try to publish with bun first
+          echo "Attempting to publish with bun..."
+          if ! bun publish --access public --registry=https://npm.pkg.github.com --no-git-checks; then
+            echo "Bun publish failed, trying with npm..."
+            
+            # Fallback to npm if bun fails
+            npm publish --access public --registry=https://npm.pkg.github.com
+            
+            # Check if npm publish succeeded
+            if [ $? -ne 0 ]; then
+              echo "Publishing failed with both bun and npm"
+              cat .npm/_logs/*.log || true
+              exit 1
+            fi
+          fi
         working-directory: ./alchemy
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
