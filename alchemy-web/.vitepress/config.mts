@@ -34,6 +34,12 @@ export default defineConfig({
     plugins: [groupIconVitePlugin() as any],
     server: {
       host: '0.0.0.0',
+      port: 5000,
+      allowedHosts: true,  // Allow any host to access the dev server
+      hmr: false  // Disable HMR for proxy environment
+    },
+    preview: {
+      host: '0.0.0.0',
       port: 5000
     }
   },
