@@ -14,17 +14,17 @@
       "apps/*"
     ],
     "catalog": {
-      "alchemy": "link:alchemy",
-      "@cloudflare/workers-types": "^4.20250805.0",
-      "@cloudflare/vite-plugin": "^1.11.6",
-      "vite": "^6.3.5",
-      "typescript": "^5.8.3"
+    "alchemy": "link:alchemy",
+    "@cloudflare/workers-types": "^4.20250924.0",
+    "@cloudflare/vite-plugin": "^1.13.5",
+    "vite": "^7.1.7",
+    "typescript": "^5.9.2"
     }
   },
   "devDependencies": {
-    "turbo": "^2.5.6"
+    "turbo": "^2.5.8"
   },
   "dependencies": {
-    "miniflare": "^4.20250906.0"
+    "miniflare": "^4.20250924.0"
   }
 }
