@@ -32,6 +32,10 @@ export default defineConfig({
   },
   vite: {
     plugins: [groupIconVitePlugin() as any],
+    server: {
+      host: '0.0.0.0',
+      port: 5000
+    }
   },
   // https://vitepress.dev/reference/default-theme-config
   themeConfig: {
