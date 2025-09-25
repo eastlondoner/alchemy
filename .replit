@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "bash"]
+modules = ["bun-1.22", "web", "bash"]
 [agent]
 expertMode = true
 
@@ -23,17 +23,17 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd alchemy-web && bun run docs:dev"
+args = "cd alchemy-web && bun dev --port 5000"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
-outputType = "webview"
 
 [[ports]]
 localPort = 5000
 externalPort = 80
 
 [deployment]
+
 deploymentTarget = "autoscale"
 run = [
   "bun",
