@@ -36,3 +36,8 @@ externalPort = 80
 [[ports]]
 localPort = 34497
 externalPort = 3000
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["bun", "run", "--filter", "alchemy-web", "docs:preview", "--port", "5000", "--host", "0.0.0.0"]
+build = ["bun", "run", "--filter", "alchemy-web", "docs:build"]
