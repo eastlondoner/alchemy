@@ -12,6 +12,7 @@ This is the Alchemy monorepo containing:
 - Core library built successfully
 - Documentation site running on port 5000 via VitePress
 - Deployment configured for production
+- VitePress configured for Replit proxy environment
 
 ## Project Architecture
 - **Build System**: TypeScript with Bun package manager
@@ -25,8 +26,16 @@ This is the Alchemy monorepo containing:
 3. Documentation server runs via the configured workflow on port 5000
 4. Visit the web preview to see the documentation site
 
+## VitePress Configuration
+The VitePress development server has been configured for Replit:
+- **Host**: 0.0.0.0 (listens on all interfaces)
+- **Port**: 5000
+- **Allowed Hosts**: All hosts allowed for proxy access
+- **HMR**: Disabled to avoid WebSocket issues in proxy environment
+
 ## Recent Changes
-- **2025-09-25**: Initial Replit environment setup completed
-  - Configured VitePress dev server to use 0.0.0.0:5000
+- **2025-09-25**: Replit environment setup completed
+  - Configured VitePress dev server for Replit proxy environment
+  - Disabled HMR to resolve WebSocket connection issues
   - Set up deployment configuration for production
-  - Documentation site successfully running and accessible
+  - Documentation site successfully running and accessible on port 5000
