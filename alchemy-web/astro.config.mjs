@@ -93,7 +93,27 @@ export default defineConfig({
         },
         {
           label: "Providers",
-          autogenerate: { directory: "providers", collapsed: true },
+          autogenerate: {
+            directory: "providers",
+            collapsed: true,
+            transform: (groups) =>
+              groups.map((group) => {
+                if (group.id !== "providers/cloudflare") {
+                  return group;
+                }
+
+                return {
+                  ...group,
+                  entries: [...group.entries].sort((a, b) => {
+                    const nameA = a.title ?? a.slug ?? "";
+                    const nameB = b.title ?? b.slug ?? "";
+                    return nameA.localeCompare(nameB, undefined, {
+                      sensitivity: "base",
+                    });
+                  }),
+                };
+              }),
+          },
         },
       ],
       expressiveCode: {
