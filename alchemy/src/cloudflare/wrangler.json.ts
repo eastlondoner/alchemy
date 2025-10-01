@@ -7,7 +7,7 @@ import { isSecret } from "../secret.ts";
 import { unencryptSecrets } from "./util/filter-env-bindings.ts";
 import { assertNever } from "../util/assert-never.ts";
 import type { Bindings, WorkerBindingRateLimit } from "./bindings.ts";
-import type { R2BucketJurisdiction } from "./bucket.ts";
+import type { R2BucketJurisdiction } from "./r2-bucket.ts";
 import type { DurableObjectNamespace } from "./durable-object-namespace.ts";
 import type { EventSource } from "./event-source.ts";
 import { isQueueEventSource } from "./event-source.ts";

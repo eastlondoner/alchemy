@@ -1,7 +1,7 @@
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
-import { R2Object } from "../../src/cloudflare/bucket-object.ts";
-import { R2Bucket } from "../../src/cloudflare/bucket.ts";
+import { R2Object } from "../../src/cloudflare/r2-object.ts";
+import { R2Bucket } from "../../src/cloudflare/r2-bucket.ts";
 import { BRANCH_PREFIX } from "../util.ts";
 
 import "../../src/test/vitest.ts";

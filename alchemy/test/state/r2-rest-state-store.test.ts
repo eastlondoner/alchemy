@@ -1,7 +1,7 @@
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { createCloudflareApi } from "../../src/cloudflare/api.ts";
-import { getBucket } from "../../src/cloudflare/bucket.ts";
+import { getBucket } from "../../src/cloudflare/r2-bucket.ts";
 import { BRANCH_PREFIX } from "../util.ts";
 
 import { destroy } from "../../src/destroy.ts";

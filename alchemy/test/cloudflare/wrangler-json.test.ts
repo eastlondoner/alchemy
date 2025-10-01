@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { Ai } from "../../src/cloudflare/ai.ts";
-import { R2Bucket } from "../../src/cloudflare/bucket.ts";
+import { R2Bucket } from "../../src/cloudflare/r2-bucket.ts";
 import { D1Database } from "../../src/cloudflare/d1-database.ts";
 import { DurableObjectNamespace } from "../../src/cloudflare/durable-object-namespace.ts";
 import { KVNamespace } from "../../src/cloudflare/kv-namespace.ts";

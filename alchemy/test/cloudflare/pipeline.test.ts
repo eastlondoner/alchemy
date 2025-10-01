@@ -1,7 +1,7 @@
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { createCloudflareApi } from "../../src/cloudflare/api.ts";
-import { R2Bucket } from "../../src/cloudflare/bucket.ts";
+import { R2Bucket } from "../../src/cloudflare/r2-bucket.ts";
 import {
   Pipeline,
   type PipelineRecord,

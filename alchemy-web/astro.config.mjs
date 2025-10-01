@@ -16,11 +16,11 @@ export default defineConfig({
   trailingSlash: "ignore",
   vite: {
     server: {
-      allowedHosts: true,  // Allow all hosts for Replit proxy
+      allowedHosts: true, // Allow all hosts for Replit proxy
     },
     preview: {
-      allowedHosts: true,  // Allow all hosts for preview server
-    }
+      allowedHosts: true, // Allow all hosts for preview server
+    },
   },
   integrations: [
     sitemap({

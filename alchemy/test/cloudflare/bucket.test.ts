@@ -10,7 +10,7 @@ import {
   listObjects,
   R2Bucket,
   withJurisdiction,
-} from "../../src/cloudflare/bucket.ts";
+} from "../../src/cloudflare/r2-bucket.ts";
 import { Worker } from "../../src/cloudflare/worker.ts";
 import { destroy } from "../../src/destroy.ts";
 import { fetchAndExpectOK } from "../../src/util/safe-fetch.ts";

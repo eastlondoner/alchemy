@@ -2,7 +2,11 @@ import type { R2PutOptions } from "@cloudflare/workers-types/experimental/index.
 import type { Context } from "../context.ts";
 import { Resource } from "../resource.ts";
 import { createCloudflareApi, type CloudflareApiOptions } from "./api.ts";
-import { deleteObject, type PutObjectObject, type R2Bucket } from "./bucket.ts";
+import {
+  deleteObject,
+  type PutObjectObject,
+  type R2Bucket,
+} from "./r2-bucket.ts";
 
 /**
  * Properties for creating or updating an R2 Object
