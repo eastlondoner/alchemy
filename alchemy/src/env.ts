@@ -1,6 +1,6 @@
 export interface Env {
-  [key: string]: Promise<string>;
-  <T = string>(name: string, value?: T | undefined, error?: string): Promise<T>;
+  [key: string]: string;
+  <T = string>(name: string, value?: T | undefined, error?: string): T;
 }
 
 export const env = new Proxy(_env, {
@@ -8,24 +8,30 @@ export const env = new Proxy(_env, {
   apply: (_, __, args: [string, any?, string?]) => _env(...args),
 }) as Env;
 
-async function _env<T = string>(
+function _env<T = string>(
   name: string,
   value?: T | undefined,
   error?: string,
-): Promise<T> {
+): T {
   if (value !== undefined) {
     return value;
   }
-  if (typeof process !== "undefined") {
-    // we are in a node environment
-    return process.env[name]! as T;
+  if (name in environment) {
+    return environment[name] as T;
   }
-  // we are in a browser environment
-  try {
-    const { env } = await import("cloudflare:workers");
-    if (name in env) {
-      return env[name as keyof typeof env] as T;
-    }
-  } catch (error) {}
   throw new Error(error ?? `Environment variable ${name} is not set`);
 }
+
+const environment = await (async (): Promise<Record<string, any>> => {
+  if (typeof process !== "undefined") {
+    return process.env;
+  }
+  try {
+    const { env } = await import("cloudflare:workers");
+    return env;
+  } catch (_error) {}
+  if (typeof import.meta !== "undefined") {
+    return import.meta.env;
+  }
+  throw new Error("No environment found");
+})();

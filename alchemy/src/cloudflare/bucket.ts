@@ -1,20 +1,33 @@
-import { AwsClient } from "aws4fetch";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
-import { type CloudflareApi, createCloudflareApi } from "./api.js";
+import { isDeepStrictEqual } from "node:util";
+import type { Context } from "../context.ts";
+import { Resource, ResourceKind } from "../resource.ts";
+import { Scope } from "../scope.ts";
+import { isRetryableError } from "../state/r2-rest-state-store.ts";
+import { withExponentialBackoff } from "../util/retry.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
+import {
+  extractCloudflareResult,
+  type CloudflareApiErrorPayload,
+} from "./api-response.ts";
+import {
+  createCloudflareApi,
+  type CloudflareApi,
+  type CloudflareApiOptions,
+} from "./api.ts";
+import { deleteMiniflareBinding } from "./miniflare/delete.ts";
+
+export type R2BucketJurisdiction = "default" | "eu" | "fedramp";
 
 /**
  * Properties for creating or updating an R2 Bucket
  */
-export interface BucketProps {
+export interface BucketProps extends CloudflareApiOptions {
   /**
    * Name of the bucket
    * Names can only contain lowercase letters (a-z), numbers (0-9), and hyphens (-)
    * Cannot begin or end with a hyphen
    *
-   * @default - the id of the resource
+   * @default ${app.name}-${app.stage}-${id}
    */
   name?: string;
 
@@ -25,10 +38,16 @@ export interface BucketProps {
   locationHint?: string;
 
   /**
+   * Optional storage class for the bucket
+   * Indicates the storage class for the bucket
+   */
+  storageClass?: "Standard" | "InfrequentAccess";
+
+  /**
    * Optional jurisdiction for the bucket
    * Determines the regulatory jurisdiction the bucket data falls under
    */
-  jurisdiction?: "default" | "eu" | "fedramp";
+  jurisdiction?: R2BucketJurisdiction;
 
   /**
    * Whether to allow public access through the r2.dev subdomain
@@ -51,47 +70,233 @@ export interface BucketProps {
   empty?: boolean;
 
   /**
-   * API Token to use for the bucket
-   */
-  apiToken?: Secret;
-
-  /**
-   * API Key to use for the bucket
-   */
-  apiKey?: Secret;
-
-  /**
-   * Email to use for the bucket
-   */
-  email?: string;
-
-  /**
-   * Account ID to use for the bucket
-   */
-  accountId?: string;
-
-  /**
-   * Access Key to use for the bucket
-   */
-  accessKey?: Secret;
-
-  /**
-   * Secret Access Key to use for the bucket
-   */
-  secretAccessKey?: Secret;
-
-  /**
    * Whether to adopt an existing bucket
    */
   adopt?: boolean;
+
+  /**
+   * CORS rules for the bucket
+   */
+  cors?: R2BucketCORSRule[];
+
+  /**
+   * Lifecycle rules for the bucket
+   */
+  lifecycle?: R2BucketLifecycleRule[];
+
+  /**
+   * Lock rules for the bucket
+   */
+  lock?: R2BucketLockRule[];
+
+  /**
+   * Whether to emulate the bucket locally when Alchemy is running in watch mode.
+   */
+  dev?: {
+    /**
+     * Whether to run the bucket remotely instead of locally
+     * @default false
+     */
+    remote?: boolean;
+
+    /**
+     * Set when `Scope.local` is true to force update to the bucket even if it was already deployed live.
+     * @internal
+     */
+    force?: boolean;
+  };
 }
+
+interface R2BucketLifecycleRule {
+  /**
+   * Unique identifier for this rule.
+   */
+  id?: string;
+
+  /**
+   * Conditions that apply to all transitions of this rule.
+   */
+  conditions?: {
+    /**
+     * Transitions will only apply to objects/uploads in the bucket that start with the given prefix, an empty prefix can be provided to scope rule to all objects/uploads.
+     */
+    prefix: string;
+  };
+
+  /**
+   * Whether or not this rule is in effect.
+   * @default true
+   */
+  enabled?: boolean;
+
+  /**
+   * Transition to abort ongoing multipart uploads.
+   */
+  abortMultipartUploadsTransition?: {
+    /**
+     * Condition for lifecycle transitions to apply after an object reaches an age in   seconds.
+     */
+    condition: {
+      /**
+       
+      /**
+       * Maximum age of the object in seconds.
+       */
+      maxAge: number;
+
+      /**
+       * Type of condition.
+       */
+      type: "Age";
+    };
+  };
+
+  /**
+   * Transition to delete objects.
+   */
+  deleteObjectsTransition?: {
+    /**
+     * Condition for lifecycle transitions to apply after an object reaches an age in seconds.
+     */
+    condition: { maxAge: number; type: "Age" } | { date: string; type: "Date" };
+  };
+
+  /**
+   * Transition to change the storage class of objects.
+   */
+  storageClassTransitions?: {
+    /**
+     * Condition for lifecycle transitions to apply after an object reaches an age in seconds.
+     */
+    condition: { maxAge: number; type: "Age" } | { date: string; type: "Date" };
+
+    /**
+     * Storage class for the bucket.
+     */
+    storageClass: "InfrequentAccess";
+  }[];
+}
+
+interface R2BucketLockRule {
+  /**
+   * Unique identifier for this rule.
+   */
+  id?: string;
+
+  /**
+   * Condition to apply a lock rule to an object for how long in seconds.
+   */
+  condition:
+    | { maxAgeSeconds: number; type: "Age" }
+    | { date: string; type: "Date" }
+    | { type: "Indefinite" };
+
+  /**
+   * Whether or not this rule is in effect.
+   * @default true
+   */
+  enabled?: boolean;
+
+  /**
+   * Rule will only apply to objects/uploads in the bucket that start with the given prefix, an empty prefix can be provided to scope rule to all objects/uploads.
+   */
+  prefix?: string;
+}
+
+interface R2BucketCORSRule {
+  /**
+   * Identifier for this rule.
+   */
+  id?: string;
+
+  /**
+   * Object specifying allowed origins, methods and headers for this CORS rule.
+   */
+  allowed: {
+    /**
+     * Specifies the value for the Access-Control-Allow-Methods header R2 sets when requesting objects in a bucket from a browser.
+     */
+    methods: ("GET" | "PUT" | "POST" | "DELETE" | "HEAD")[];
+
+    /**
+     * Specifies the value for the Access-Control-Allow-Origin header R2 sets when requesting objects in a bucket from a browser.
+     */
+    origins: string[];
+
+    /**
+     * Specifies the value for the Access-Control-Allow-Headers header R2 sets when requesting objects in this bucket from a browser. Cross-origin requests that include custom headers (e.g. x-user-id) should specify these headers as AllowedHeaders.
+     */
+    headers?: string[];
+  };
+
+  /**
+   * Specifies the headers that can be exposed back, and accessed by, the JavaScript making the cross-origin request. If you need to access headers beyond the safelisted response headers, such as Content-Encoding or cf-cache-status, you must specify it here.
+   */
+  exposeHeaders?: string[];
+
+  /**
+   * Specifies the amount of time (in seconds) browsers are allowed to cache CORS preflight responses. Browsers may limit this to 2 hours or less, even if the maximum value (86400) is specified.
+   */
+  maxAgeSeconds?: number;
+}
+
+export type R2ObjectMetadata = {
+  key: string;
+  etag: string;
+  uploaded: Date;
+  size: number;
+};
+
+export type R2Object = R2ObjectMetadata & {
+  arrayBuffer(): Promise<ArrayBuffer>;
+  bytes(): Promise<Uint8Array>;
+  text(): Promise<string>;
+  json<T>(): Promise<T>;
+  blob(): Promise<Blob>;
+};
+
+export type PutR2ObjectResponse = {
+  key: string;
+  etag: string;
+  uploaded: Date;
+  version: string;
+  size: number;
+};
+
+export type R2Objects = {
+  objects: R2ObjectMetadata[];
+} & (
+  | {
+      truncated: true;
+      cursor: string;
+    }
+  | {
+      truncated: false;
+      cursor?: never;
+    }
+);
+
+export type R2Bucket = _R2Bucket & {
+  head(key: string): Promise<R2ObjectMetadata | null>;
+  get(key: string): Promise<R2Object | null>;
+  put(
+    key: string,
+    value:
+      | ReadableStream
+      | ArrayBuffer
+      | ArrayBufferView
+      | string
+      | null
+      | Blob,
+  ): Promise<PutR2ObjectResponse>;
+  delete(key: string): Promise<Response>;
+  list(options?: R2ListOptions): Promise<R2Objects>;
+};
 
 /**
  * Output returned after R2 Bucket creation/update
  */
-export interface R2Bucket
-  extends Resource<"cloudflare::R2Bucket">,
-    BucketProps {
+type _R2Bucket = Omit<BucketProps, "delete" | "dev"> & {
   /**
    * Resource type identifier
    */
@@ -111,6 +316,31 @@ export interface R2Bucket
    * Time at which the bucket was created
    */
   creationDate: Date;
+
+  /**
+   * The `r2.dev` subdomain for the bucket, if `allowPublicAccess` is true
+   */
+  domain: string | undefined;
+
+  /**
+   * Development mode properties
+   * @internal
+   */
+  dev: {
+    /**
+     * The ID of the bucket in development mode
+     */
+    id: string;
+
+    /**
+     * Whether the bucket is running remotely
+     */
+    remote: boolean;
+  };
+};
+
+export function isBucket(resource: any): resource is R2Bucket {
+  return resource?.[ResourceKind] === "cloudflare::R2Bucket";
 }
 
 /**
@@ -157,125 +387,234 @@ export interface R2Bucket
  *
  * @see https://developers.cloudflare.com/r2/buckets/
  */
-export const R2Bucket = Resource(
+export async function R2Bucket(
+  id: string,
+  props: BucketProps = {},
+): Promise<R2Bucket> {
+  const api = await createCloudflareApi(props);
+  const bucket = await _R2Bucket(id, {
+    ...props,
+    dev: {
+      ...(props.dev ?? {}),
+      force: Scope.current.local,
+    },
+  });
+  return {
+    ...bucket,
+    head: async (key: string) =>
+      headObject(api, {
+        bucketName: bucket.name,
+        key,
+      }),
+    get: async (key: string) => {
+      const response = await getObject(api, {
+        bucketName: bucket.name,
+        key,
+      });
+      if (response.ok) {
+        return parseR2Object(key, response);
+      } else if (response.status === 404) {
+        return null;
+      } else {
+        throw await handleApiError(response, "get", "object", key);
+      }
+    },
+    list: async (options?: R2ListOptions): Promise<R2Objects> =>
+      listObjects(api, bucket.name, {
+        ...options,
+        jurisdiction: bucket.jurisdiction,
+      }),
+    put: async (
+      key: string,
+      value: PutObjectObject,
+    ): Promise<PutR2ObjectResponse> => {
+      const response = await putObject(api, {
+        bucketName: bucket.name,
+        key: key,
+        object: value,
+      });
+      const body = (await response.json()) as {
+        result: {
+          key: string;
+          etag: string;
+          uploaded: string;
+          version: string;
+          size: string;
+        };
+      };
+      return {
+        key: body.result.key,
+        etag: body.result.etag,
+        uploaded: new Date(body.result.uploaded),
+        version: body.result.version,
+        size: Number(body.result.size),
+      };
+    },
+    delete: async (key: string) =>
+      deleteObject(api, {
+        bucketName: bucket.name,
+        key: key,
+      }),
+  };
+}
+
+const parseR2Object = (key: string, response: Response): R2Object => ({
+  etag: response.headers.get("ETag")!,
+  uploaded: parseDate(response.headers),
+  key,
+  size: Number(response.headers.get("Content-Length")),
+  arrayBuffer: () => response.arrayBuffer(),
+  bytes: () => response.bytes(),
+  text: () => response.text(),
+  json: () => response.json(),
+  blob: () => response.blob(),
+});
+
+const parseDate = (headers: Headers) =>
+  new Date(headers.get("Last-Modified") ?? headers.get("Date")!);
+
+const _R2Bucket = Resource(
   "cloudflare::R2Bucket",
   async function (
-    this: Context<R2Bucket>,
+    this: Context<_R2Bucket>,
     id: string,
     props: BucketProps = {},
-  ): Promise<R2Bucket> {
+  ): Promise<_R2Bucket> {
+    const bucketName =
+      props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output?.name !== bucketName) {
+      this.replace();
+    }
+
+    const allowPublicAccess = props.allowPublicAccess === true;
+    const dev = {
+      id: this.output?.dev?.id ?? bucketName,
+      remote: props.dev?.remote ?? false,
+    };
+    const adopt = props.adopt ?? this.scope.adopt;
+
+    if (this.scope.local && !props.dev?.remote) {
+      return {
+        name: this.output?.name ?? "",
+        location: this.output?.location ?? "",
+        creationDate: this.output?.creationDate ?? new Date(),
+        jurisdiction: this.output?.jurisdiction ?? "default",
+        allowPublicAccess,
+        domain: this.output?.domain,
+        type: "r2_bucket",
+        accountId: this.output?.accountId ?? "",
+        cors: props.cors,
+        dev,
+      };
+    }
+
     const api = await createCloudflareApi(props);
-    const bucketName = props.name || this.id;
 
     if (this.phase === "delete") {
       if (props.delete !== false) {
-        if (props.empty) {
-          console.log("Emptying R2 bucket:", bucketName);
-          const r2Client = await createR2Client({
-            ...props,
-            accountId: api.accountId,
-          });
-          // Empty the bucket first by deleting all objects
-          await emptyBucket(r2Client, bucketName, props.jurisdiction);
+        if (this.output.dev?.id) {
+          await deleteMiniflareBinding(this.scope, "r2", this.output.dev.id);
         }
-
+        if (props.empty) {
+          await emptyBucket(api, bucketName, props);
+        }
         await deleteBucket(api, bucketName, props);
       }
-
-      // Return void (a deleted bucket has no content)
       return this.destroy();
     }
-    if (this.phase === "create") {
-      try {
-        await createBucket(api, bucketName, props);
-      } catch (err) {
-        if (err instanceof CloudflareApiError && err.status === 409) {
-          if (!props.adopt) {
-            throw err;
+
+    if (this.phase === "create" || !this.output?.name) {
+      const bucket = await createBucket(api, bucketName, props).catch(
+        async (err) => {
+          if (
+            err instanceof CloudflareApiError &&
+            err.status === 409 &&
+            adopt
+          ) {
+            return await getBucket(api, bucketName, props);
           }
-        } else {
           throw err;
-        }
+        },
+      );
+      const domain = await putManagedDomain(
+        api,
+        bucketName,
+        allowPublicAccess,
+        props.jurisdiction,
+      );
+      if (props.cors?.length) {
+        await putBucketCORS(api, bucketName, props);
       }
+      if (props.lifecycle?.length) {
+        await putBucketLifecycleRules(api, bucketName, props);
+      }
+      if (props.lock?.length) {
+        await putBucketLockRules(api, bucketName, props);
+      }
+      return {
+        name: bucketName,
+        location: bucket.location,
+        creationDate: new Date(bucket.creation_date),
+        jurisdiction: bucket.jurisdiction,
+        allowPublicAccess,
+        domain,
+        type: "r2_bucket",
+        accountId: api.accountId,
+        lifecycle: props.lifecycle,
+        lock: props.lock,
+        cors: props.cors,
+        dev,
+      };
+    } else {
+      if (bucketName !== this.output.name) {
+        throw new Error(
+          `Cannot update R2Bucket name after creation. Bucket name is immutable. Before: ${this.output.name}, After: ${bucketName}`,
+        );
+      }
+      let domain = this.output.domain;
+      if (!!domain !== allowPublicAccess) {
+        domain = await putManagedDomain(
+          api,
+          bucketName,
+          allowPublicAccess,
+          props.jurisdiction,
+        );
+      }
+      if (!isDeepStrictEqual(this.output.cors ?? [], props.cors ?? [])) {
+        await putBucketCORS(api, bucketName, props);
+      }
+      if (
+        !isDeepStrictEqual(this.output.lifecycle ?? [], props.lifecycle ?? [])
+      ) {
+        await putBucketLifecycleRules(api, bucketName, props);
+      }
+      if (!isDeepStrictEqual(this.output.lock ?? [], props.lock ?? [])) {
+        await putBucketLockRules(api, bucketName, props);
+      }
+      return {
+        ...this.output,
+        allowPublicAccess,
+        dev,
+        cors: props.cors,
+        lifecycle: props.lifecycle,
+        lock: props.lock,
+        domain,
+      };
     }
-
-    await updatePublicAccess(
-      api,
-      bucketName,
-      props.allowPublicAccess === true,
-      props.jurisdiction,
-    );
-
-    return this({
-      name: bucketName,
-      location: props.locationHint || "default",
-      creationDate: new Date(),
-      jurisdiction: props.jurisdiction || "default",
-      type: "r2_bucket",
-      accountId: api.accountId,
-    });
   },
 );
 
 /**
- * Configuration for R2 client to connect to Cloudflare R2
+ * The bucket information returned from the Cloudflare REST API
+ * @see https://developers.cloudflare.com/api/node/resources/r2/subresources/buckets/models/bucket/#(schema)
  */
-export interface R2ClientConfig {
-  accountId: string;
-  accessKeyId?: Secret;
-  secretAccessKey?: Secret;
-  jurisdiction?: string;
-}
-
-type R2Client = AwsClient & { accountId: string };
-
-/**
- * Creates an aws4fetch client configured for Cloudflare R2
- *
- * @see https://developers.cloudflare.com/r2/examples/aws/aws-sdk-js-v3/
- */
-export function createR2Client(config?: R2ClientConfig): Promise<R2Client> {
-  const accountId = config?.accountId ?? process.env.CLOUDFLARE_ACCOUNT_ID;
-  const accessKeyId =
-    config?.accessKeyId?.unencrypted || process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey =
-    config?.secretAccessKey?.unencrypted || process.env.R2_SECRET_ACCESS_KEY;
-
-  if (!accountId) {
-    throw new Error("CLOUDFLARE_ACCOUNT_ID environment variable is required");
-  }
-
-  if (!accessKeyId || !secretAccessKey) {
-    throw new Error(
-      "R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY environment variables are required",
-    );
-  }
-
-  // Create aws4fetch client with Cloudflare R2 endpoint
-  const client: any = new AwsClient({
-    accessKeyId,
-    secretAccessKey,
-    service: "s3",
-    region: "auto",
-  });
-  client.accountId = accountId;
-  return client;
-}
-
-interface CloudflareBucketResponse {
-  /**
-   * The bucket information returned from the Cloudflare REST API
-   * @see https://developers.cloudflare.com/api/node/resources/r2/subresources/buckets/models/bucket/#(schema)
-   */
-  result: {
-    creation_date: string;
-    location?: "apac" | "eeur" | "enam" | "weur" | "wnam" | "oc";
-    name: string;
-    storage_class?: "Standard" | "InfrequentAccess";
-  };
-  success: boolean;
-  errors: Array<{ code: number; message: string }>;
-  messages: string[];
+interface R2BucketResult {
+  creation_date: string;
+  location: "apac" | "eeur" | "enam" | "weur" | "wnam" | "oc";
+  name: string;
+  storage_class: "Standard" | "InfrequentAccess";
+  jurisdiction: "default" | "eu" | "fedramp";
 }
 
 /**
@@ -286,24 +625,14 @@ interface CloudflareBucketResponse {
  * @returns Modified headers object
  */
 export function withJurisdiction(
-  headers: Record<string, string>,
-  props: BucketProps | { jurisdiction?: string } | string | undefined,
+  props: { jurisdiction?: string },
+  headers: Record<string, string> = {},
 ): Record<string, string> {
-  // Clone the headers object to avoid modifying the original
-  const result = { ...headers };
-
-  let jurisdiction: string | undefined;
-  if (typeof props === "string") {
-    jurisdiction = props;
-  } else if (props && "jurisdiction" in props) {
-    jurisdiction = props.jurisdiction;
+  if (props.jurisdiction && props.jurisdiction !== "default") {
+    headers["cf-r2-jurisdiction"] = props.jurisdiction;
   }
 
-  if (jurisdiction && jurisdiction !== "default") {
-    result["cf-r2-jurisdiction"] = jurisdiction;
-  }
-
-  return result;
+  return headers;
 }
 
 /**
@@ -313,28 +642,12 @@ export async function getBucket(
   api: CloudflareApi,
   bucketName: string,
   props: BucketProps = {},
-): Promise<CloudflareBucketResponse> {
-  const headers = withJurisdiction({}, props);
-  const getResponse = await api.get(
-    `/accounts/${api.accountId}/r2/buckets/${bucketName}`,
-    { headers },
-  );
-
-  if (!getResponse.ok) {
-    return await handleApiError(getResponse, "get", "R2 bucket", bucketName);
-  }
-
-  if (getResponse.status === 200) {
-    return (await getResponse.json()) as CloudflareBucketResponse;
-  }
-
-  const errorData: any = await getResponse.json().catch(() => ({
-    errors: [{ message: getResponse.statusText }],
-  }));
-
-  throw new CloudflareApiError(
-    `Error getting R2 bucket '${bucketName}': ${errorData.errors?.[0]?.message || getResponse.statusText}`,
-    getResponse,
+): Promise<R2BucketResult> {
+  return await extractCloudflareResult<R2BucketResult>(
+    `get R2 bucket "${bucketName}"`,
+    api.get(`/accounts/${api.accountId}/r2/buckets/${bucketName}`, {
+      headers: withJurisdiction(props),
+    }),
   );
 }
 
@@ -345,34 +658,21 @@ export async function createBucket(
   api: CloudflareApi,
   bucketName: string,
   props: BucketProps = {},
-): Promise<CloudflareBucketResponse> {
-  // Create new R2 bucket
-  const createPayload: any = {
-    name: bucketName,
-  };
-
-  if (props.locationHint) {
-    createPayload.location_hint = props.locationHint;
-  }
-
-  const headers = withJurisdiction({}, props);
-
-  const createResponse = await api.post(
-    `/accounts/${api.accountId}/r2/buckets`,
-    createPayload,
-    { headers },
+): Promise<R2BucketResult> {
+  return await extractCloudflareResult<R2BucketResult>(
+    `create R2 bucket "${bucketName}"`,
+    api.post(
+      `/accounts/${api.accountId}/r2/buckets`,
+      {
+        name: bucketName,
+        locationHint: props.locationHint,
+        storageClass: props.storageClass,
+      },
+      {
+        headers: withJurisdiction(props),
+      },
+    ),
   );
-
-  if (!createResponse.ok) {
-    return await handleApiError(
-      createResponse,
-      "creating",
-      "R2 bucket",
-      bucketName,
-    );
-  }
-
-  return (await createResponse.json()) as CloudflareBucketResponse;
 }
 
 /**
@@ -382,266 +682,163 @@ export async function deleteBucket(
   api: CloudflareApi,
   bucketName: string,
   props: BucketProps,
-): Promise<void> {
-  // Delete R2 bucket
-  const headers = withJurisdiction({}, props);
-
-  const deleteResponse = await api.delete(
-    `/accounts/${api.accountId}/r2/buckets/${bucketName}`,
-    { headers },
-  );
-
-  if (!deleteResponse.ok && deleteResponse.status !== 404) {
-    const errorData: any = await deleteResponse.json().catch(() => ({
-      errors: [{ message: deleteResponse.statusText }],
-    }));
-    throw new CloudflareApiError(
-      `Error deleting R2 bucket '${bucketName}': ${errorData.errors?.[0]?.message || deleteResponse.statusText}`,
-      deleteResponse,
-    );
-  }
-}
-
-/**
- * List objects in an R2 bucket
- *
- * @param r2 R2Client instance
- * @param bucketName Name of the bucket
- * @param continuationToken Optional token for pagination
- * @param jurisdiction Optional jurisdiction for the bucket
- * @returns Object containing the list of objects and the next continuation token
- */
-export async function listObjects(
-  r2: R2Client,
-  bucketName: string,
-  continuationToken?: string,
-  jurisdiction?: string,
-): Promise<{ objects: { Key: string }[]; continuationToken?: string }> {
-  // List objects in the bucket
-  const url = new URL(
-    `https://${r2.accountId}.r2.cloudflarestorage.com/${bucketName}`,
-  );
-  if (continuationToken) {
-    url.searchParams.set("continuation-token", continuationToken);
-  }
-  url.searchParams.set("list-type", "2");
-
-  const headers = withJurisdiction({}, jurisdiction);
-
-  const listResponse = await r2.fetch(url.toString(), { headers });
-  if (!listResponse.ok) {
-    throw new CloudflareApiError(
-      `Failed to list objects: ${listResponse.statusText}`,
-      listResponse,
-    );
-  }
-
-  const responseText = await listResponse.text();
-
-  // Extract objects from XML response using regex
-  const keyRegex = /<Key>([^<]+)<\/Key>/g;
-  const objects: { Key: string }[] = [];
-  let match;
-  while ((match = keyRegex.exec(responseText)) !== null) {
-    objects.push({ Key: match[1] });
-  }
-
-  // Get continuation token if present using regex
-  const tokenMatch =
-    /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(
-      responseText,
-    );
-  const nextContinuationToken = tokenMatch ? tokenMatch[1] : undefined;
-
-  return { objects, continuationToken: nextContinuationToken };
-}
-
-/**
- * Helper function to empty a bucket by deleting all objects
- */
-export async function emptyBucket(
-  r2: R2Client,
-  bucketName: string,
-  jurisdiction?: string,
-): Promise<void> {
-  let continuationToken: string | undefined;
-  let totalDeleted = 0;
-
+) {
   try {
-    do {
-      console.log(`Listing objects in bucket ${bucketName}`);
-      // List objects in the bucket
-      const { objects, continuationToken: nextToken } = await listObjects(
-        r2,
-        bucketName,
-        continuationToken,
-        jurisdiction,
-      );
-
-      continuationToken = nextToken;
-
-      console.log(`Found ${objects.length} objects in bucket ${bucketName}`);
-
-      // Delete objects in batches
-      if (objects.length > 0) {
-        // Process delete in batches of 1000 (S3 limit)
-        for (let i = 0; i < objects.length; i += 1000) {
-          const batch = objects.slice(i, i + 1000);
-
-          // Create DeleteObjects request XML
-          const deleteXml = `
-            <Delete>
-              ${batch.map((obj) => `<Object><Key>${obj.Key}</Key></Object>`).join("")}
-            </Delete>
-          `;
-
-          const deleteUrl = new URL(
-            `https://${r2.accountId}.r2.cloudflarestorage.com/${bucketName}?delete`,
-          );
-
-          console.log(
-            `Deleting ${batch.length} objects from bucket ${bucketName}`,
-          );
-
-          const headers = withJurisdiction(
-            { "Content-Type": "application/xml" },
-            jurisdiction,
-          );
-
-          const deleteResponse = await r2.fetch(deleteUrl.toString(), {
-            method: "POST",
-            body: deleteXml,
-            headers,
-          });
-
-          if (!deleteResponse.ok) {
-            throw new CloudflareApiError(
-              `Failed to delete objects: ${deleteResponse.statusText}`,
-              deleteResponse,
-            );
-          }
-
-          totalDeleted += batch.length;
-        }
-      }
-    } while (continuationToken);
-
-    console.log(
-      `Successfully emptied bucket ${bucketName}, deleted ${totalDeleted} objects total`,
+    await extractCloudflareResult(
+      `delete R2 bucket "${bucketName}"`,
+      api.delete(`/accounts/${api.accountId}/r2/buckets/${bucketName}`, {
+        headers: withJurisdiction(props),
+      }),
     );
   } catch (error) {
     if (error instanceof CloudflareApiError && error.status === 404) {
-      // the bucket was not found
       return;
     }
-    console.error(`Failed to empty bucket ${bucketName}:`, error);
     throw error;
   }
 }
 
 /**
- * Update public access setting for a bucket
- *
- * This operation is not available through the S3 API for R2,
- * so we still use the Cloudflare API directly.
+ * Update the managed domain setting for a bucket
  */
-export async function updatePublicAccess(
+export async function putManagedDomain(
   api: CloudflareApi,
   bucketName: string,
-  allowPublicAccess: boolean,
+  enabled: boolean,
   jurisdiction?: string,
-): Promise<void> {
-  const headers = withJurisdiction({}, jurisdiction);
-
-  const response = await api.put(
-    `/accounts/${api.accountId}/r2/buckets/${bucketName}/domains/managed`,
-    {
-      enabled: allowPublicAccess,
-    },
-    { headers },
-  );
-
-  if (!response.ok) {
-    await handleApiError(
-      response,
-      "updating public access for",
-      "R2 bucket",
-      bucketName,
-    );
-  }
-}
-
-/**
- * Set CORS configuration for a bucket using aws4fetch
- */
-export async function setCorsConfiguration(
-  r2: R2Client,
-  bucketName: string,
-  allowedOrigins: string[] = ["*"],
-  allowedMethods: string[] = ["GET", "HEAD", "PUT", "POST", "DELETE"],
-  allowedHeaders: string[] = ["*"],
-  maxAgeSeconds = 3600,
-  jurisdiction?: string,
-): Promise<void> {
-  try {
-    // Construct CORS XML configuration
-    const corsXml = `
-      <CORSConfiguration>
-        <CORSRule>
-          ${allowedOrigins.map((origin) => `<AllowedOrigin>${origin}</AllowedOrigin>`).join("")}
-          ${allowedMethods.map((method) => `<AllowedMethod>${method}</AllowedMethod>`).join("")}
-          ${allowedHeaders.map((header) => `<AllowedHeader>${header}</AllowedHeader>`).join("")}
-          <ExposeHeader>ETag</ExposeHeader>
-          <MaxAgeSeconds>${maxAgeSeconds}</MaxAgeSeconds>
-        </CORSRule>
-      </CORSConfiguration>
-    `;
-
-    const url = new URL(
-      `https://${r2.accountId}.r2.cloudflarestorage.com/${bucketName}?cors`,
-    );
-
-    const headers = withJurisdiction(
-      { "Content-Type": "application/xml" },
-      jurisdiction,
-    );
-
-    const response = await r2.fetch(url.toString(), {
-      method: "PUT",
-      body: corsXml,
-      headers,
-    });
-
-    if (!response.ok) {
-      throw new CloudflareApiError(
-        `Failed to set CORS configuration: ${response.statusText}`,
-        response,
+) {
+  return await withExponentialBackoff(
+    async () => {
+      const result = await extractCloudflareResult<{
+        bucketId: string;
+        domain: string;
+        enabled: boolean;
+      }>(
+        `put R2 bucket managed domain for "${bucketName}"`,
+        api.put(
+          `/accounts/${api.accountId}/r2/buckets/${bucketName}/domains/managed`,
+          { enabled },
+          { headers: withJurisdiction({ jurisdiction }) },
+        ),
       );
-    }
+      return result.enabled ? result.domain : undefined;
+    },
+    (err) => err.status === 404,
+    10,
+    1000,
+  );
+}
 
-    console.log(`Successfully set CORS configuration for bucket ${bucketName}`);
-  } catch (error) {
-    console.error(
-      `Failed to set CORS configuration for bucket ${bucketName}:`,
-      error,
-    );
-    throw error;
+/**
+ * Delete all objects in a bucket
+ */
+async function emptyBucket(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps,
+) {
+  let cursor: string | undefined;
+  while (true) {
+    const result = await listObjects(api, bucketName, {
+      jurisdiction: props.jurisdiction,
+      cursor,
+    });
+    if (result.objects.length) {
+      // Another undocumented API! But it lets us delete multiple objects at once instead of one by one.
+      await extractCloudflareResult(
+        `delete ${result.objects.length} objects from bucket "${bucketName}"`,
+        api.delete(
+          `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects`,
+          {
+            headers: withJurisdiction(props),
+            method: "DELETE",
+            body: JSON.stringify(result.objects.map((object) => object.key)),
+          },
+        ),
+      );
+      if (result.cursor) {
+        cursor = result.cursor;
+        continue;
+      }
+    }
+    break;
   }
 }
 
 /**
- * Information about an R2 bucket returned by list operations
+ * Lists objects in a bucket.
  */
-export interface R2BucketInfo {
-  /**
-   * Name of the bucket
-   */
-  Name: string;
-
-  /**
-   * Creation date of the bucket
-   */
-  CreationDate: Date;
+export async function listObjects(
+  api: CloudflareApi,
+  bucketName: string,
+  props: R2ListOptions & {
+    jurisdiction?: string;
+  },
+): Promise<R2Objects> {
+  const params = new URLSearchParams({
+    per_page: "1000",
+  });
+  if (props.cursor) {
+    params.set("cursor", props.cursor);
+  }
+  if (props.delimiter) {
+    params.set("delimiter", props.delimiter);
+  }
+  if (props.prefix) {
+    params.set("prefix", props.prefix);
+  }
+  if (props.startAfter) {
+    params.set("start_after", props.startAfter);
+  }
+  if (props.limit) {
+    params.set("limit", props.limit.toString());
+  }
+  const response = await api.get(
+    `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects?${params.toString()}`,
+    { headers: withJurisdiction(props) },
+  );
+  const json: {
+    result: {
+      key: string;
+      etag: string;
+      last_modified: string;
+      size: number;
+    }[];
+    result_info?: {
+      cursor: string;
+      is_truncated: boolean;
+      per_page: number;
+    };
+    success: boolean;
+    errors: CloudflareApiErrorPayload[];
+  } = await response.json();
+  if (!json.success) {
+    // 10006 indicates that the bucket does not exist, so there are no objects to list
+    if (json.errors.some((e) => e.code === 10006)) {
+      return {
+        objects: [],
+        cursor: undefined,
+        truncated: false,
+      };
+    }
+    throw new CloudflareApiError(
+      `Failed to list objects in bucket "${bucketName}": ${json.errors.map((e) => `- [${e.code}] ${e.message}${e.documentation_url ? ` (${e.documentation_url})` : ""}`).join("\n")}`,
+      response,
+      json.errors,
+    );
+  }
+  return {
+    // keys: json.result.map((object) => object.key),
+    objects: json.result.map((object) => ({
+      key: object.key,
+      etag: object.etag,
+      uploaded: new Date(object.last_modified),
+      size: object.size,
+    })),
+    delimitedPrefixes: [],
+    cursor: json.result_info?.cursor,
+    truncated: json.result_info?.is_truncated ?? false,
+  } as R2Objects;
 }
 
 /**
@@ -660,7 +857,7 @@ export async function listBuckets(
     direction?: "asc" | "desc";
     jurisdiction?: string;
   } = {},
-): Promise<R2BucketInfo[]> {
+) {
   // Build query parameters
   const params = new URLSearchParams();
 
@@ -683,39 +880,255 @@ export async function listBuckets(
   // Build URL with query parameters
   const path = `/accounts/${api.accountId}/r2/buckets${params.toString() ? `?${params.toString()}` : ""}`;
 
-  // Set jurisdiction header if provided
-  const headers = withJurisdiction({}, options.jurisdiction);
-
   // Make the API request
-  const response = await api.get(path, { headers });
+  const result = await extractCloudflareResult<{
+    buckets: { name: string; creation_date: string }[];
+  }>(
+    "list R2 buckets",
+    api.get(path, {
+      headers: withJurisdiction(options),
+    }),
+  );
+  return result.buckets;
+}
 
-  if (!response.ok) {
+export async function putBucketCORS(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps,
+) {
+  let request: RequestInit;
+  if (props.cors?.length) {
+    request = {
+      method: "PUT",
+      body: JSON.stringify({ rules: props.cors }),
+      headers: withJurisdiction(props, {
+        "Content-Type": "application/json",
+      }),
+    };
+  } else {
+    request = {
+      method: "DELETE",
+      headers: withJurisdiction(props),
+    };
+  }
+  await extractCloudflareResult(
+    `${request.method} R2 bucket CORS rules for "${bucketName}"`,
+    api.fetch(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/cors`,
+      request,
+    ),
+  );
+}
+
+export async function putBucketLifecycleRules(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps,
+) {
+  const rulesBody = Array.isArray(props.lifecycle)
+    ? props.lifecycle.length === 0
+      ? { rules: [] }
+      : {
+          rules: props.lifecycle.map((rule) => ({
+            ...rule,
+            // Required by the API; empty prefix means all objects/uploads
+            conditions: rule.conditions ?? { prefix: "" },
+            // Required by the API
+            enabled: rule.enabled ?? true,
+          })),
+        }
+    : {};
+
+  await extractCloudflareResult(
+    `put R2 bucket lifecycle rules for "${bucketName}"`,
+    api.put(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/lifecycle`,
+      rulesBody,
+      { headers: withJurisdiction(props) },
+    ),
+  );
+}
+
+/**
+ * Get lifecycle rules for a bucket
+ */
+export async function getBucketLifecycleRules(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps = {},
+): Promise<R2BucketLifecycleRule[]> {
+  const res = await api.get(
+    `/accounts/${api.accountId}/r2/buckets/${bucketName}/lifecycle`,
+    { headers: withJurisdiction(props) },
+  );
+  const json: any = await res.json();
+  if (!json?.success) {
     throw new CloudflareApiError(
-      `Failed to list buckets: ${response.statusText}`,
-      response,
+      `Failed to get R2 bucket lifecycle rules for "${bucketName}": ${res.status} ${res.statusText}`,
+      res,
+      json?.errors,
     );
   }
+  const rules: any[] = Array.isArray(json.result)
+    ? json.result
+    : (json.result?.rules ?? []);
+  return rules as R2BucketLifecycleRule[];
+}
 
-  const data = (await response.json()) as {
-    success: boolean;
-    errors?: Array<{ code: number; message: string }>;
-    result?: {
-      buckets: Array<{
-        name: string;
-        creation_date: string;
-        location?: string;
-      }>;
-    };
-  };
+export async function putBucketLockRules(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps,
+) {
+  const rulesBody = Array.isArray(props.lock)
+    ? props.lock.length === 0
+      ? { rules: [] }
+      : {
+          rules: props.lock.map((rule) => ({
+            ...rule,
+            // Required by the API
+            enabled: rule.enabled ?? true,
+          })),
+        }
+    : {};
 
-  if (!data.success) {
-    const errorMessage = data.errors?.[0]?.message || "Unknown error";
-    throw new Error(`Failed to list buckets: ${errorMessage}`);
+  await extractCloudflareResult(
+    `put R2 bucket lock rules for "${bucketName}"`,
+    api.put(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/lock`,
+      rulesBody,
+      { headers: withJurisdiction(props) },
+    ),
+  );
+}
+
+/**
+ * Get lock rules for a bucket
+ */
+export async function getBucketLockRules(
+  api: CloudflareApi,
+  bucketName: string,
+  props: BucketProps = {},
+): Promise<R2BucketLockRule[]> {
+  const res = await api.get(
+    `/accounts/${api.accountId}/r2/buckets/${bucketName}/lock`,
+    { headers: withJurisdiction(props) },
+  );
+  const json: any = await res.json();
+  if (!json?.success) {
+    throw new CloudflareApiError(
+      `Failed to get R2 bucket lock rules for "${bucketName}": ${res.status} ${res.statusText}`,
+      res,
+      json?.errors,
+    );
   }
+  const rules: any[] = Array.isArray(json.result)
+    ? json.result
+    : (json.result?.rules ?? []);
+  return rules as R2BucketLockRule[];
+}
 
-  // Transform API response to R2BucketInfo objects
-  return (data.result?.buckets || []).map((bucket) => ({
-    Name: bucket.name,
-    CreationDate: new Date(bucket.creation_date),
-  }));
+export async function headObject(
+  api: CloudflareApi,
+  { bucketName, key }: { bucketName: string; key: string },
+): Promise<R2ObjectMetadata | null> {
+  const response = await withRetries(
+    async () =>
+      await api.get(
+        `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects/${key}`,
+      ),
+  );
+  // for some reason HEAD returns 404 for keys that exist, this is the best we can do without using S3 API
+  response.body?.cancel();
+  if (response.status === 404) {
+    return null;
+  } else if (!response.ok) {
+    throw await handleApiError(response, "head", "object", key);
+  }
+  return {
+    key,
+    etag: response.headers.get("ETag")?.replace(/"/g, "")!,
+    uploaded: parseDate(response.headers),
+    size: Number(response.headers.get("Content-Length")),
+  };
+}
+
+const withRetries = (f: () => Promise<Response>) => {
+  return withExponentialBackoff(f, isRetryableError, 5, 1000);
+};
+
+export async function getObject(
+  api: CloudflareApi,
+  { bucketName, key }: { bucketName: string; key: string },
+) {
+  return await withRetries(async () => {
+    const response = await api.get(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects/${key}`,
+      {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          Accept: "application/octet-stream",
+        },
+      },
+    );
+    if (!response.ok && response.status !== 404) {
+      throw await handleApiError(response, "get", "object", key);
+    }
+    return response;
+  });
+}
+
+type PutObjectObject =
+  | ReadableStream
+  | ArrayBuffer
+  | ArrayBufferView
+  | string
+  | Blob;
+
+export async function putObject(
+  api: CloudflareApi,
+  {
+    bucketName,
+    key,
+    object,
+  }: {
+    bucketName: string;
+    key: string;
+    object: PutObjectObject;
+  },
+): Promise<Response> {
+  // Using withExponentialBackoff for reliability
+  return await withRetries(async () => {
+    const response = await api.put(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects/${key}`,
+      object,
+      {
+        headers: {
+          "Content-Type": "application/octet-stream",
+        },
+      },
+    );
+    if (!response.ok) {
+      await handleApiError(response, "put", "object", key);
+    }
+    return response;
+  });
+}
+
+export async function deleteObject(
+  api: CloudflareApi,
+  { bucketName, key }: { bucketName: string; key: string },
+) {
+  return await withRetries(async () => {
+    const response = await api.delete(
+      `/accounts/${api.accountId}/r2/buckets/${bucketName}/objects/${key}`,
+    );
+
+    if (!response.ok && response.status !== 404) {
+      await handleApiError(response, "delete", "object", key);
+    }
+
+    return response;
+  });
 }

@@ -1,12 +1,13 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
 import {
   createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
-} from "./api.js";
-import type { Queue } from "./queue.js";
+} from "./api.ts";
+import type { Queue } from "./queue.ts";
 
 /**
  * Settings for configuring a Queue Consumer
@@ -41,6 +42,12 @@ export interface QueueConsumerSettings {
    * @default 30
    */
   retryDelay?: number;
+
+  /**
+   * Dead letter queue for messages that exceed max retries
+   * Can be either a queue name (string) or a Queue object
+   */
+  deadLetterQueue?: string | Queue;
 }
 
 /**
@@ -48,16 +55,9 @@ export interface QueueConsumerSettings {
  */
 export interface QueueConsumerProps extends CloudflareApiOptions {
   /**
-   * The queue to consume
-   * Either queue or queueId must be provided
+   * The {@link Queue} or Queue ID to consume
    */
-  queue?: Queue;
-
-  /**
-   * The queue ID to consume (alternative to providing a queue)
-   * Either queue or queueId must be provided
-   */
-  queueId?: string;
+  queue: string | Queue;
 
   /**
    * Name of the worker script that will consume the queue
@@ -75,14 +75,28 @@ export interface QueueConsumerProps extends CloudflareApiOptions {
    * @default true
    */
   delete?: boolean;
+
+  /**
+   * Whether to adopt an existing consumer.
+   * If set to true, the consumer will be updated if it already exists.
+   * @default false
+   */
+  adopt?: boolean;
+
+  /**
+   * If true, the queue consumer will not be created, but will be retained if it already exists.
+   * This is used for local development.
+   *
+   * @default `false`
+   * @internal
+   */
+  dev?: boolean;
 }
 
 /**
  * Output returned after Queue Consumer creation/update
  */
-export interface QueueConsumer
-  extends Resource<"cloudflare::QueueConsumer">,
-    QueueConsumerProps {
+export interface QueueConsumer extends QueueConsumerProps {
   /**
    * Unique ID for the consumer
    */
@@ -138,20 +152,29 @@ export const QueueConsumer = Resource(
   "cloudflare::QueueConsumer",
   async function (
     this: Context<QueueConsumer>,
-    id: string,
+    _id: string,
     props: QueueConsumerProps,
   ): Promise<QueueConsumer> {
-    const api = await createCloudflareApi(props);
-
     // Get queueId from either props.queue or props.queueId
-    const queueId = props.queue?.id || props.queueId;
+    const queueId =
+      typeof props.queue === "string" ? props.queue : props.queue.id;
 
-    if (!queueId) {
-      throw new Error("Either queue or queueId must be provided");
+    if (this.scope.local && props.dev) {
+      return {
+        id: this.output?.id ?? "",
+        queueId,
+        queue: props.queue,
+        type: "worker",
+        scriptName: props.scriptName,
+        settings: props.settings,
+        accountId: this.output?.accountId ?? "",
+      };
     }
 
+    const api = await createCloudflareApi(props);
+
     if (this.phase === "delete") {
-      console.log(`Deleting Queue Consumer for queue ${queueId}`);
+      logger.log(`Deleting Queue Consumer for queue ${queueId}`);
       if (props.delete !== false && this.output?.id) {
         // Delete the consumer
         await deleteQueueConsumer(api, queueId, this.output.id);
@@ -160,22 +183,53 @@ export const QueueConsumer = Resource(
       // Return void (a deleted consumer has no content)
       return this.destroy();
     }
+
+    if (!queueId) {
+      throw new Error("Either queue or queueId must be provided");
+    }
+
     let consumerData: CloudflareQueueConsumerResponse;
 
-    if (this.phase === "create") {
-      consumerData = await createQueueConsumer(api, queueId, props);
-    } else if (this.output?.id) {
+    if (this.phase === "create" || !this.output?.id) {
+      try {
+        consumerData = await createQueueConsumer(api, queueId, props);
+      } catch (err) {
+        if (
+          err instanceof CloudflareApiError &&
+          err.status === 400 &&
+          err.message.includes("already has a consumer") &&
+          (props.adopt ?? this.scope.adopt)
+        ) {
+          const consumerId = await findQueueConsumerId(
+            api,
+            props.scriptName,
+            queueId,
+          );
+          if (!consumerId) {
+            throw new Error(
+              `Consumer for worker ${props.scriptName} and queue ${queueId} not found`,
+            );
+          }
+          consumerData = await updateQueueConsumer(
+            api,
+            queueId,
+            consumerId,
+            props,
+          );
+        } else {
+          throw err;
+        }
+      }
+    } else {
       consumerData = await updateQueueConsumer(
         api,
         queueId,
         this.output.id,
         props,
       );
-    } else {
-      consumerData = await createQueueConsumer(api, queueId, props);
     }
 
-    return this({
+    return {
       id: consumerData.result.consumer_id,
       queueId,
       queue: props.queue,
@@ -188,11 +242,12 @@ export const QueueConsumer = Resource(
             maxRetries: consumerData.result.settings.max_retries,
             maxWaitTimeMs: consumerData.result.settings.max_wait_time_ms,
             retryDelay: consumerData.result.settings.retry_delay,
+            deadLetterQueue: consumerData.result.settings.dead_letter_queue,
           }
         : undefined,
       createdOn: consumerData.result.created_on,
       accountId: api.accountId,
-    });
+    };
   },
 );
 
@@ -209,6 +264,7 @@ interface CloudflareQueueConsumerResponse {
       max_retries?: number;
       max_wait_time_ms?: number;
       retry_delay?: number;
+      dead_letter_queue?: string;
     };
     type: "worker";
     queue_id?: string;
@@ -256,6 +312,14 @@ export async function createQueueConsumer(
     if (props.settings.retryDelay !== undefined) {
       createPayload.settings.retry_delay = props.settings.retryDelay;
     }
+
+    if (props.settings.deadLetterQueue !== undefined) {
+      const dlqName =
+        typeof props.settings.deadLetterQueue === "string"
+          ? props.settings.deadLetterQueue
+          : props.settings.deadLetterQueue.name;
+      createPayload.settings.dead_letter_queue = dlqName;
+    }
   }
 
   const createResponse = await api.post(
@@ -288,12 +352,11 @@ export async function deleteQueueConsumer(
   );
 
   if (!deleteResponse.ok && deleteResponse.status !== 404) {
-    const errorData: any = await deleteResponse.json().catch(() => ({
-      errors: [{ message: deleteResponse.statusText }],
-    }));
-    throw new CloudflareApiError(
-      `Error deleting Queue Consumer '${consumerId}': ${errorData.errors?.[0]?.message || deleteResponse.statusText}`,
+    await handleApiError(
       deleteResponse,
+      "deleting",
+      "Queue Consumer",
+      consumerId,
     );
   }
 }
@@ -335,6 +398,14 @@ async function updateQueueConsumer(
 
     if (props.settings.retryDelay !== undefined) {
       updatePayload.settings.retry_delay = props.settings.retryDelay;
+    }
+
+    if (props.settings.deadLetterQueue !== undefined) {
+      const dlqName =
+        typeof props.settings.deadLetterQueue === "string"
+          ? props.settings.deadLetterQueue
+          : props.settings.deadLetterQueue.name;
+      updatePayload.settings.dead_letter_queue = dlqName;
     }
   }
 
@@ -397,6 +468,7 @@ export async function listQueueConsumers(
         max_retries?: number;
         max_wait_time_ms?: number;
         retry_delay?: number;
+        dead_letter_queue?: string;
       };
     }>;
   };
@@ -420,7 +492,76 @@ export async function listQueueConsumers(
           maxRetries: consumer.settings.max_retries,
           maxWaitTimeMs: consumer.settings.max_wait_time_ms,
           retryDelay: consumer.settings.retry_delay,
+          deadLetterQueue: consumer.settings.dead_letter_queue,
         }
       : undefined,
+  }));
+}
+
+export async function findQueueConsumerId(
+  api: CloudflareApi,
+  workerName: string,
+  queueId: string,
+): Promise<string | undefined> {
+  const consumers = await listQueueConsumersForWorker(api, workerName);
+  const consumer = consumers.find((c) => c.queueId === queueId);
+  return consumer?.consumerId;
+}
+
+export async function listQueueConsumersForWorker(
+  api: CloudflareApi,
+  workerName: string,
+) {
+  const response = await api.get(
+    `/accounts/${api.accountId}/workers/scripts/${workerName}/queue-consumers?perPage=100`,
+  );
+
+  if (response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    return await handleApiError(
+      response,
+      "list",
+      "QueueConsumer",
+      `for worker ${workerName}`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    result: Array<{
+      script: string;
+      settings?: {
+        batch_size?: number;
+        max_retries?: number;
+        max_wait_time_ms?: number;
+        retry_delay?: number;
+        dead_letter_queue?: string;
+      };
+      type: string;
+      queue_name: string;
+      queue_id: string;
+      consumer_id: string;
+      created_on: string;
+    }>;
+    success: boolean;
+    errors: any[] | null;
+    messages: any[] | null;
+    result_info: {
+      page: number;
+      per_page: number;
+      count: number;
+      total_count: number;
+      total_pages: number;
+    };
+  };
+
+  return data.result.map((consumer) => ({
+    queueName: consumer.queue_name,
+    queueId: consumer.queue_id,
+    consumerId: consumer.consumer_id,
+    createdOn: consumer.created_on,
+    settings: consumer.settings,
   }));
 }

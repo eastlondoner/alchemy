@@ -5,17 +5,18 @@ import {
   LambdaClient,
   ResourceNotFoundException,
 } from "@aws-sdk/client-lambda";
-import { describe, expect } from "bun:test";
 import path from "node:path";
+import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.js";
 import { Function } from "../../src/aws/function.js";
 import type { PolicyDocument } from "../../src/aws/policy.js";
 import { Role } from "../../src/aws/role.js";
 import { destroy } from "../../src/destroy.js";
-import { Bundle } from "../../src/esbuild";
+import { Bundle } from "../../src/esbuild/index.js";
+import { fetchAndExpectOK } from "../../src/util/safe-fetch.ts";
 import { BRANCH_PREFIX } from "../util.js";
 
-import "../../src/test/bun.js";
+import "../../src/test/vitest.js";
 
 const test = alchemy.test(import.meta, {
   prefix: BRANCH_PREFIX,
@@ -54,17 +55,47 @@ const LAMBDA_LOGS_POLICY: PolicyDocument = {
   ],
 };
 
-// Helper function to invoke a Lambda function directly
-const invokeLambda = async (functionName: string, event: any) => {
-  const invokeResponse = await lambda.send(
-    new InvokeCommand({
-      FunctionName: functionName,
-      Payload: JSON.stringify(event),
-    }),
-  );
+// Helper function to invoke Lambda with retry for IAM propagation
+const invokeLambda = async (
+  functionName: string,
+  event: any,
+  maxRetries = 5,
+) => {
+  let lastError;
 
-  const responsePayload = new TextDecoder().decode(invokeResponse.Payload);
-  return JSON.parse(responsePayload);
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const invokeResponse = await lambda.send(
+        new InvokeCommand({
+          FunctionName: functionName,
+          Payload: JSON.stringify(event),
+        }),
+      );
+
+      const responsePayload = new TextDecoder().decode(invokeResponse.Payload);
+      return JSON.parse(responsePayload);
+    } catch (error: any) {
+      lastError = error;
+
+      // Only retry for IAM role propagation errors
+      if (
+        error.name === "AccessDeniedException" &&
+        error.message?.includes("cannot be assumed by Lambda")
+      ) {
+        if (attempt < maxRetries - 1) {
+          // Wait before retrying with exponential backoff
+          const delay = Math.min(1000 * 2 ** attempt, 5000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+
+      // For other errors or max retries reached, rethrow
+      throw error;
+    }
+  }
+
+  throw lastError;
 };
 
 describe("AWS Resources", () => {
@@ -72,7 +103,7 @@ describe("AWS Resources", () => {
     test("create function with bundled code", async (scope) => {
       // First create the execution role
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
       const functionName = `${BRANCH_PREFIX}-alchemy-test-function`;
       const roleName = `${BRANCH_PREFIX}-alchemy-test-lambda-role`;
@@ -80,7 +111,7 @@ describe("AWS Resources", () => {
       try {
         let bundle = await Bundle(`${BRANCH_PREFIX}-test-lambda-bundle`, {
           entryPoint: path.join(__dirname, "..", "handler.ts"),
-          outdir: ".out",
+          outdir: `.out/${BRANCH_PREFIX}-test-lambda-bundle`,
           format: "cjs",
           platform: "node",
           target: "node18",
@@ -132,18 +163,7 @@ describe("AWS Resources", () => {
 
         // Invoke the function
         const testEvent = { test: "event" };
-        const invokeResponse = await lambda.send(
-          new InvokeCommand({
-            FunctionName: functionName,
-            Payload: JSON.stringify(testEvent),
-          }),
-        );
-
-        // Parse the response
-        const responsePayload = new TextDecoder().decode(
-          invokeResponse.Payload,
-        );
-        const response = JSON.parse(responsePayload);
+        const response = await invokeLambda(functionName, testEvent);
         expect(response.statusCode).toBe(200);
 
         const body = JSON.parse(response.body);
@@ -167,7 +187,7 @@ describe("AWS Resources", () => {
     test("create function with URL configuration", async (scope) => {
       // Create execution role
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
       const functionName = `${BRANCH_PREFIX}-alchemy-test-function-url`;
       const roleName = `${BRANCH_PREFIX}-alchemy-test-lambda-url-role`;
@@ -175,7 +195,7 @@ describe("AWS Resources", () => {
       try {
         let bundle = await Bundle(`${BRANCH_PREFIX}-test-lambda-url-bundle`, {
           entryPoint: path.join(__dirname, "..", "handler.ts"),
-          outdir: ".out",
+          outdir: `.out/${BRANCH_PREFIX}-test-lambda-url-bundle`,
           format: "cjs",
           platform: "node",
           target: "node18",
@@ -231,7 +251,7 @@ describe("AWS Resources", () => {
 
         // Test function URL by making an HTTP request
         const testEvent = { test: "event" };
-        const response = await fetch(func.functionUrl!, {
+        const response = await fetchAndExpectOK(func.functionUrl!, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -241,7 +261,7 @@ describe("AWS Resources", () => {
 
         expect(response.status).toBe(200);
 
-        const responseBody = await response.json();
+        const responseBody: any = await response.json();
         expect(responseBody.message).toBe("Hello from bundled handler!");
         expect(responseBody.event).toEqual(testEvent);
 
@@ -278,7 +298,7 @@ describe("AWS Resources", () => {
 
     test("create function with URL then remove URL in update phase", async (scope) => {
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
       const functionName = `${BRANCH_PREFIX}-alchemy-test-func-url-remove`;
       const roleName = `${BRANCH_PREFIX}-alchemy-test-lambda-url-rem-role`;
@@ -288,7 +308,7 @@ describe("AWS Resources", () => {
           `${BRANCH_PREFIX}-test-lambda-url-remove-bundle`,
           {
             entryPoint: path.join(__dirname, "..", "handler.ts"),
-            outdir: ".out",
+            outdir: `.out/${BRANCH_PREFIX}-test-lambda-url-remove-bundle`,
             format: "cjs",
             platform: "node",
             target: "node18",
@@ -337,7 +357,7 @@ describe("AWS Resources", () => {
 
         // Test function URL invocation
         const testEvent = { test: "url-event" };
-        const urlResponse = await fetch(func.functionUrl!, {
+        const urlResponse = await fetchAndExpectOK(func.functionUrl!, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -345,9 +365,7 @@ describe("AWS Resources", () => {
           body: JSON.stringify(testEvent),
         });
 
-        expect(urlResponse.status).toBe(200);
-
-        const urlResponseBody = await urlResponse.json();
+        const urlResponseBody: any = await urlResponse.json();
         expect(urlResponseBody.message).toBe("Hello from bundled handler!");
         expect(urlResponseBody.event).toEqual(testEvent);
 
@@ -382,7 +400,7 @@ describe("AWS Resources", () => {
           await fetch(func.functionUrl || "https://invalid-url", {
             method: "POST",
           });
-        } catch (error) {
+        } catch {
           urlFailed = true;
         }
         expect(urlFailed).toBe(true);
@@ -402,7 +420,7 @@ describe("AWS Resources", () => {
 
     test("create function without URL then add URL in update phase", async (scope) => {
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
       const functionName = `${BRANCH_PREFIX}-alchemy-test-func-add-url`;
       const roleName = `${BRANCH_PREFIX}-alchemy-test-lambda-add-url-role`;
@@ -412,7 +430,7 @@ describe("AWS Resources", () => {
           `${BRANCH_PREFIX}-test-lambda-add-url-bundle`,
           {
             entryPoint: path.join(__dirname, "..", "handler.ts"),
-            outdir: ".out",
+            outdir: `.out/${BRANCH_PREFIX}-test-lambda-add-url-bundle`,
             format: "cjs",
             platform: "node",
             target: "node18",
@@ -489,7 +507,7 @@ describe("AWS Resources", () => {
 
         // Test function URL invocation
         const testEvent = { test: "added-url-event" };
-        const urlResponse = await fetch(func.functionUrl!, {
+        const urlResponse = await fetchAndExpectOK(func.functionUrl!, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -497,9 +515,7 @@ describe("AWS Resources", () => {
           body: JSON.stringify(testEvent),
         });
 
-        expect(urlResponse.status).toBe(200);
-
-        const urlResponseBody = await urlResponse.json();
+        const urlResponseBody: any = await urlResponse.json();
         expect(urlResponseBody.message).toBe("Hello from bundled handler!");
         expect(urlResponseBody.event).toEqual(testEvent);
 
@@ -518,7 +534,7 @@ describe("AWS Resources", () => {
 
     test("create function with URL invokeMode configuration", async (scope) => {
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
       const functionName = `${BRANCH_PREFIX}-alchemy-test-func-invoke-mode`;
       const roleName = `${BRANCH_PREFIX}-alchemy-test-lambda-invoke-mode-role`;
@@ -528,7 +544,7 @@ describe("AWS Resources", () => {
           `${BRANCH_PREFIX}-test-lambda-invoke-mode-bundle`,
           {
             entryPoint: path.join(__dirname, "..", "handler.ts"),
-            outdir: ".out",
+            outdir: `.out/${BRANCH_PREFIX}-test-lambda-invoke-mode-bundle`,
             format: "cjs",
             platform: "node",
             target: "node18",
@@ -587,7 +603,7 @@ describe("AWS Resources", () => {
         });
 
         expect(response.status).toBe(200);
-        const responseBody = await response.json();
+        const responseBody: any = await response.json();
         expect(responseBody.message).toBe("Hello from bundled handler!");
         expect(responseBody.event).toEqual(testEvent);
 
@@ -641,7 +657,7 @@ describe("AWS Resources", () => {
 
         // Test function URL invocation (now in RESPONSE_STREAM mode)
         const streamTestEvent = { test: "response-stream-mode" };
-        const streamResponse = await fetch(func.functionUrl!, {
+        const streamResponse = await fetchAndExpectOK(func.functionUrl!, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -650,7 +666,6 @@ describe("AWS Resources", () => {
         });
 
         // Check the status code
-        expect(streamResponse.status).toBe(200);
 
         // Test the URL configuration to verify the invokeMode setting was properly applied
         const urlConfig = await lambda.send(
@@ -750,13 +765,13 @@ describe("AWS Resources", () => {
 
     test("create function with handler containing _, 0-9, and A-Z", async (scope) => {
       // Define resources that need to be cleaned up
-      let role: Role | undefined = undefined;
+      let role: Role | undefined;
       let func: Function | null = null;
 
       try {
         let bundle = await Bundle("bundle", {
           entryPoint: path.join(__dirname, "..", "handler.ts"),
-          outdir: ".out",
+          outdir: `.out/${BRANCH_PREFIX}-test-lambda-special-chars-bundle`,
           format: "cjs",
           platform: "node",
           target: "node18",
@@ -805,14 +820,13 @@ describe("AWS Resources", () => {
         );
 
         // Test function invocation via URL
-        const response = await fetch(func.functionUrl!, {
+        const response = await fetchAndExpectOK(func.functionUrl!, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ test: "special-handler" }),
         });
 
-        expect(response.status).toBe(200);
-        const body = await response.json();
+        const body: any = await response.json();
         expect(body.message).toBe("Hello from bundled handler!");
       } finally {
         await destroy(scope);

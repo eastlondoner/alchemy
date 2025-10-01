@@ -1,16 +1,17 @@
-import type { Context } from "../context.js";
+import type { Context } from "../context.ts";
 import type {
   DnsRecord as BaseDnsRecord,
   DnsRecordType,
   DnsRecordWithMetadata,
-} from "../dns/record.js";
-import { Resource } from "../resource.js";
+} from "../dns/record.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
 import {
   type CloudflareApi,
   type CloudflareApiOptions,
   createCloudflareApi,
-} from "./api.js";
-import type { CloudflareResponse } from "./response.js";
+} from "./api.ts";
+import type { CloudflareResponse } from "./response.ts";
 
 /**
  * Cloudflare DNS Record response format
@@ -67,7 +68,7 @@ export interface DnsRecordsProps extends CloudflareApiOptions {
 /**
  * Output returned after DNS records creation/update
  */
-export interface DnsRecords extends Resource<"cloudflare::DnsRecords"> {
+export interface DnsRecords {
   /**
    * Zone ID where records are created
    */
@@ -127,7 +128,7 @@ export const DnsRecords = Resource(
   "cloudflare::DnsRecords",
   async function (
     this: Context<DnsRecords>,
-    id: string,
+    _id: string,
     props: DnsRecordsProps,
   ): Promise<DnsRecords> {
     // Create Cloudflare API client
@@ -146,12 +147,12 @@ export const DnsRecords = Resource(
                 `/zones/${zoneId}/dns_records/${record.id}`,
               );
               if (!response.ok && response.status !== 404) {
-                console.error(
+                logger.error(
                   `Failed to delete DNS record ${record.name}: ${response.statusText}`,
                 );
               }
             } catch (error) {
-              console.error(`Error deleting DNS record ${record.name}:`, error);
+              logger.error(`Error deleting DNS record ${record.name}:`, error);
             }
           }),
         );
@@ -181,12 +182,12 @@ export const DnsRecords = Resource(
               `/zones/${zoneId}/dns_records/${record.id}`,
             );
             if (!response.ok && response.status !== 404) {
-              console.error(
+              logger.error(
                 `Failed to delete DNS record ${record.name}: ${response.statusText}`,
               );
             }
           } catch (error) {
-            console.error(`Error deleting DNS record ${record.name}:`, error);
+            logger.error(`Error deleting DNS record ${record.name}:`, error);
           }
         }),
       );
@@ -218,10 +219,10 @@ export const DnsRecords = Resource(
         }),
       );
 
-      return this({
+      return {
         zoneId,
         records: updatedRecords,
-      });
+      };
     }
 
     // Create new records
@@ -269,10 +270,10 @@ export const DnsRecords = Resource(
       }),
     );
 
-    return this({
+    return {
       zoneId,
       records: createdRecords,
-    });
+    };
   },
 );
 
@@ -307,7 +308,7 @@ async function createOrUpdateRecord(
             zoneId,
           );
         }
-      } catch (err) {
+      } catch (_err) {
         // Fall through to the original error
       }
     }

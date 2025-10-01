@@ -1,8 +1,9 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
 
 /**
  * Properties for executing a shell command
@@ -47,7 +48,7 @@ export interface ExecProps {
   /**
    * Environment variables to set
    */
-  env?: Record<string, string>;
+  env?: Record<string, string | Secret<string> | undefined>;
 
   /**
    * Whether to inherit stdio from parent process
@@ -59,7 +60,7 @@ export interface ExecProps {
 /**
  * Output returned after command execution
  */
-export interface Exec extends Resource<"os::Exec">, ExecProps {
+export interface Exec extends ExecProps {
   /**
    * Unique identifier for this execution
    */
@@ -120,6 +121,19 @@ export interface Exec extends Resource<"os::Exec">, ExecProps {
  *   command: "npm run build",
  *   cwd: "./my-project",
  *   env: { NODE_ENV: "production" }
+ * });
+ *
+ * @example
+ * // Run a command with secrets in environment variables
+ * import alchemy from "alchemy";
+ *
+ * const deploy = await Exec("deploy-app", {
+ *   command: "npm run deploy",
+ *   env: {
+ *     NODE_ENV: "production",
+ *     API_KEY: alchemy.secret(process.env.API_KEY),
+ *     DATABASE_URL: alchemy.secret(process.env.DATABASE_URL)
+ *   }
  * });
  *
  * @example
@@ -198,10 +212,23 @@ export const Exec = Resource(
       // Parse the command into command and args
       const [cmd, ...args] = props.command.split(/\s+/);
 
+      // Process environment variables, extracting values from secrets
+      const processedEnv: Record<string, string> = {};
+      if (props.env) {
+        for (const [key, value] of Object.entries(props.env)) {
+          if (typeof value === "string") {
+            processedEnv[key] = value;
+          } else if (value) {
+            // Handle Secret objects
+            processedEnv[key] = value.unencrypted;
+          }
+        }
+      }
+
       // Use spawn for better stdio control
       const childProcess = spawn(cmd, args, {
         cwd: props.cwd || process.cwd(),
-        env: { ...process.env, ...props.env },
+        env: { ...process.env, ...processedEnv },
         shell: true, // Use shell to handle complex commands
         stdio: inheritStdio ? "inherit" : "pipe", // Inherit stdio when requested
       });
@@ -218,7 +245,7 @@ export const Exec = Resource(
       }
 
       // Wait for the process to complete
-      exitCode = await new Promise<number>((resolve, reject) => {
+      exitCode = await new Promise<number>((resolve, _reject) => {
         childProcess.on("close", (code) => {
           resolve(code || 0);
         });
@@ -241,7 +268,7 @@ export const Exec = Resource(
     }
 
     // Return the execution result
-    return this({
+    return {
       id,
       command: props.command,
       cwd: props.cwd,
@@ -254,7 +281,7 @@ export const Exec = Resource(
       executedAt: Date.now(),
       completed: true,
       hash,
-    });
+    };
   },
 );
 
@@ -267,29 +294,71 @@ const defaultOptions: SpawnOptions = {
 };
 
 /**
+ * Options for exec function
+ */
+export interface ExecOptions extends Partial<SpawnOptions> {
+  /**
+   * Whether to capture stdout and stderr
+   * @default false
+   */
+  captureOutput?: boolean;
+}
+
+/**
  * Execute a shell command.
+ *
+ * @param command The command to execute
+ * @param options Options for the command execution
+ * @returns Promise that resolves when the command completes.
+ *          If captureOutput is true, resolves with { stdout, stderr } strings.
  */
 export async function exec(
   command: string,
-  options?: Partial<SpawnOptions>,
-): Promise<void> {
+  options?: ExecOptions,
+): Promise<{ stdout: string; stderr: string } | undefined> {
   const [cmd, ...args] = command.split(/\s+/);
+  const captureOutput = options?.captureOutput === true;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, {
+    // Set stdio to pipe only if we're capturing output
+    const spawnOptions = {
       ...defaultOptions,
       ...options,
       env: {
         ...defaultOptions.env,
         ...options?.env,
       },
-    });
+      stdio: captureOutput ? "pipe" : defaultOptions.stdio,
+    };
+
+    const child = spawn(cmd, args, spawnOptions);
+
+    let stdout = "";
+    let stderr = "";
+
+    if (captureOutput) {
+      child.stdout?.on("data", (data) => {
+        stdout += data.toString();
+      });
+
+      child.stderr?.on("data", (data) => {
+        stderr += data.toString();
+      });
+    }
 
     child.on("close", (code) => {
       if (code === 0) {
-        resolve();
+        if (captureOutput) {
+          resolve({ stdout, stderr });
+        } else {
+          resolve(undefined);
+        }
       } else {
-        reject(new Error(`Command failed with exit code ${code}`));
+        reject(
+          new Error(
+            `Command failed with exit code ${code}${stderr ? `: ${stderr}` : ""}`,
+          ),
+        );
       }
     });
 
@@ -300,13 +369,14 @@ export async function exec(
 }
 
 async function hashInputs(cwd: string, patterns: string[]) {
-  const { glob, readFile } = await import("node:fs/promises");
+  const { glob } = await import("glob");
+  const { readFile } = await import("node:fs/promises");
 
   const hashes = new Map<string, string>();
 
   await Promise.all(
     patterns.flatMap(async (pattern) => {
-      const files = await Array.fromAsync(glob(pattern, { cwd }));
+      const files = await glob(pattern, { cwd });
       return Promise.all(
         files.map(async (file: string) => {
           const path = join(cwd, file);

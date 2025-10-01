@@ -1,19 +1,30 @@
 {
   "name": "alchemy-web",
+  "type": "module",
+  "version": "0.0.1",
   "scripts": {
-    "docs:gen": "bun alchemy.run.ts",
-    "docs:dev": "vitepress dev",
-    "docs:build": "vitepress build",
-    "docs:preview": "vitepress preview"
+    "dev": "astro dev",
+    "build": "astro build",
+    "deploy": "alchemy deploy",
+    "preview": "astro preview",
+    "astro": "astro"
   },
   "dependencies": {
-    "sharp": "^0.34.1",
-    "vitepress-plugin-group-icons": "^1.5.2"
+    "@astrojs/check": "^0.9.4",
+    "@astrojs/cloudflare": "12.6.0",
+    "@astrojs/sitemap": "^3.5.0",
+    "@astrojs/starlight": "^0.34.3",
+    "alchemy": "workspace:*",
+    "astro": "^5.12.8",
+    "starlight-blog": "^0.24.0",
+    "starlight-links-validator": "^0.17.2"
   },
   "devDependencies": {
-    "@shikijs/vitepress-twoslash": "^3.4.0",
-    "markdown-it-footnote": "^4.0.0",
-    "vitepress": "^1.6.3",
-    "vue": "^3.5.13"
+    "@cloudflare/workers-types": "catalog:",
+    "astro-expressive-code": "^0.41.2",
+    "playwright": "^1.54.2",
+    "sharp": "^0.32.5",
+    "starlight-theme-nova": "^0.9.0",
+    "typescript": "catalog:"
   }
 }

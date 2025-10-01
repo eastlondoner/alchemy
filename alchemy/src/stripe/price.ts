@@ -1,38 +1,97 @@
-import Stripe from "stripe";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
+import type Stripe from "stripe";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { createStripeClient, handleStripeDeleteError } from "./client.ts";
+import type { Meter } from "./meter.ts";
 
 /**
  * Properties for price recurring configuration
  */
-export interface PriceRecurring {
-  /**
-   * Specifies billing frequency. Either 'day', 'week', 'month' or 'year'.
-   */
-  interval: Stripe.PriceCreateParams.Recurring.Interval;
+export type PriceRecurring =
+  // If usageType is 'metered', meter is required
+  | {
+      /**
+       * Specifies billing frequency. Either 'day', 'week', 'month' or 'year'.
+       */
+      interval: Stripe.PriceCreateParams.Recurring.Interval;
 
-  /**
-   * The number of intervals between subscription billings. For example, interval=month and interval_count=3 bills every 3 months.
-   */
-  intervalCount?: number;
+      /**
+       * The number of intervals between subscription billings. For example, interval=month and interval_count=3 bills every 3 months.
+       */
+      intervalCount?: number;
 
-  /**
-   * Configures how the quantity per period should be determined, can be either 'metered' or 'licensed'.
-   * 'licensed' will automatically bill the quantity set for a plan when adding it to a subscription,
-   * 'metered' will aggregate the total usage based on usage records.
-   */
-  usageType?: Stripe.PriceCreateParams.Recurring.UsageType;
+      /**
+       * Configures how the quantity per period should be determined, can be either 'metered' or 'licensed'.
+       * 'metered' will aggregate the total usage based on usage records.
+       */
+      usageType: "metered";
 
-  /**
-   * Specifies a usage aggregation strategy for prices of `usage_type=metered`. Allowed values are `sum` for summing up all usage during a period,
-   * `last_during_period` for picking the last usage record reported within a period,
-   * `last_ever` for picking the last usage record ever (across period bounds) or `max` which picks the usage record with the maximum reported usage during a period.
-   */
-  aggregateUsage?: Stripe.PriceCreateParams.Recurring.AggregateUsage;
-}
+      /**
+       * The ID of the billing meter this price is associated with.
+       * Required when usageType = 'metered'.
+       */
+      meter: string | Meter;
+    }
+  // If usageType is 'licensed' or not provided, meter is not allowed
+  | {
+      /**
+       * Specifies billing frequency. Either 'day', 'week', 'month' or 'year'.
+       */
+      interval: Stripe.PriceCreateParams.Recurring.Interval;
+
+      /**
+       * The number of intervals between subscription billings. For example, interval=month and interval_count=3 bills every 3 months.
+       */
+      intervalCount?: number;
+
+      /**
+       * Configures how the quantity per period should be determined, can be either 'metered' or 'licensed'.
+       * 'licensed' will automatically bill the quantity set for a plan when adding it to a subscription.
+       */
+      usageType?: "licensed" | undefined;
+
+      /**
+       * The ID of the billing meter this price is associated with.
+       * Not applicable when usageType is not 'metered'.
+       */
+      meter?: never;
+    };
 
 type TaxBehavior = Stripe.PriceCreateParams.TaxBehavior;
 type BillingScheme = Stripe.PriceCreateParams.BillingScheme;
+
+/**
+ * Properties for price tier configuration
+ */
+export interface PriceTier {
+  /**
+   * The flat billing amount for an entire tier, regardless of the number of units in the tier
+   */
+  flatAmount?: number;
+
+  /**
+   * Same as flat_amount, but accepts a decimal string with at most 12 decimal places
+   */
+  flatAmountDecimal?: string;
+
+  /**
+   * The per-unit amount to charge for units within this tier
+   */
+  unitAmount?: number;
+
+  /**
+   * Same as unit_amount, but accepts a decimal string with at most 12 decimal places
+   */
+  unitAmountDecimal?: string;
+
+  /**
+   * Specifies the upper bound of the tier. Can be a number or 'inf' for infinity.
+   * The last tier should have up_to set to 'inf'.
+   */
+  upTo: number | "inf";
+}
 
 /**
  * Properties for creating a Stripe price
@@ -106,12 +165,52 @@ export interface PriceProps {
    * If set to true, will atomically transfer the lookup key from an existing price to this price.
    */
   transferLookupKey?: boolean;
+
+  /**
+   * API key to use (overrides environment variable)
+   */
+  apiKey?: Secret;
+
+  /**
+   * If true, adopt existing resource if creation fails due to conflict
+   */
+  adopt?: boolean;
+
+  /**
+   * Each element represents a pricing tier. This parameter requires `billingScheme` to be set to `tiered`.
+   * An array of up to 250 tiers. Each tier has an upper bound and a price.
+   */
+  tiers?: PriceTier[];
+
+  /**
+   * Defines if the tiering price should be `graduated` or `volume` based.
+   * In `volume`-based tiering, the maximum quantity within a period determines the per unit price.
+   * In `graduated` tiering, pricing can change as the quantity grows.
+   */
+  tiersMode?: "graduated" | "volume" | undefined;
+
+  /**
+   * Apply a transformation to the reported usage or set quantity before computing the amount billed
+   */
+  transformQuantity?:
+    | {
+        /**
+         * Divide usage by this number
+         */
+        divideBy: number;
+
+        /**
+         * After dividing usage, either round the result `up` or `down`
+         */
+        round: "up" | "down";
+      }
+    | undefined;
 }
 
 /**
  * Output from the Stripe price
  */
-export interface Price extends Resource<"stripe::Price">, PriceProps {
+export interface Price extends PriceProps {
   /**
    * The ID of the price
    */
@@ -136,6 +235,26 @@ export interface Price extends Resource<"stripe::Price">, PriceProps {
    * The lookup key (if any) used by the customer to identify this price object
    */
   lookupKey?: string;
+
+  /**
+   * The pricing tiers (if using tiered billing scheme)
+   */
+  tiers?: PriceTier[];
+
+  /**
+   * The tiering mode (graduated or volume)
+   */
+  tiersMode?: "graduated" | "volume" | undefined;
+
+  /**
+   * Transform quantity configuration
+   */
+  transformQuantity?:
+    | {
+        divideBy: number;
+        round: "up" | "down";
+      }
+    | undefined;
 }
 
 /**
@@ -162,47 +281,86 @@ export interface Price extends Resource<"stripe::Price">, PriceProps {
  * });
  *
  * @example
- * // Create a metered price for usage-based billing
- * const meteredPrice = await Price("storage", {
+ * // Create a graduated tiered price with usage-based billing
+ * const tieredPrice = await Price("api-usage", {
  *   currency: "usd",
- *   unitAmount: 25, // $0.25 per GB
  *   product: "prod_xyz",
+ *   billingScheme: "tiered",
+ *   tiersMode: "graduated",
  *   recurring: {
  *     interval: "month",
- *     usageType: "metered",
- *     aggregateUsage: "sum"
- *   }
+ *     usageType: "metered"
+ *   },
+ *   tiers: [
+ *     {
+ *       upTo: 10000,
+ *       unitAmount: 0 // First 10k API calls free
+ *     },
+ *     {
+ *       upTo: 50000,
+ *       unitAmount: 2 // $0.02 per call up to 50k
+ *     },
+ *     {
+ *       upTo: "inf",
+ *       unitAmount: 1 // $0.01 per call beyond 50k
+ *     }
+ *   ]
  * });
  *
  * @example
- * // Create a tiered price with tax behavior
- * const tieredPrice = await Price("enterprise", {
+ * // Create a volume-based tiered price with overage cap
+ * const volumePrice = await Price("storage", {
  *   currency: "usd",
- *   unitAmount: 10000, // $100.00
  *   product: "prod_xyz",
  *   billingScheme: "tiered",
- *   taxBehavior: "exclusive",
- *   metadata: {
- *     tier: "enterprise",
- *     features: "all"
- *   }
+ *   tiersMode: "volume",
+ *   recurring: {
+ *     interval: "month"
+ *   },
+ *   tiers: [
+ *     {
+ *       upTo: 100,
+ *       unitAmount: 500 // $5 per GB for up to 100GB
+ *     },
+ *     {
+ *       upTo: 1000,
+ *       unitAmount: 400 // $4 per GB for 101-1000GB
+ *     },
+ *     {
+ *       upTo: "inf",
+ *       flatAmount: 300000 // Cap at $3000 for unlimited storage
+ *     }
+ *   ]
+ * });
+ *
+ * @example
+ * // Create a metered price with billing meter for API usage tracking
+ * const meteredPrice = await Price("api-usage-price", {
+ *   product: "prod_xyz",
+ *   currency: "usd",
+ *   billingScheme: "tiered",
+ *   tiersMode: "graduated",
+ *   recurring: {
+ *     interval: "month",
+ *     usageType: "metered",
+ *     meter: "meter_123abc" // Associate with billing meter
+ *   },
+ *   tiers: [
+ *     { upTo: 10000, unitAmountDecimal: "0" },
+ *     { upTo: 25000, unitAmountDecimal: "0.002" },
+ *     { upTo: "inf", flatAmountDecimal: "3000" }
+ *   ]
  * });
  */
 export const Price = Resource(
   "stripe::Price",
   async function (
     this: Context<Price>,
-    id: string,
+    _id: string,
     props: PriceProps,
   ): Promise<Price> {
-    // Get Stripe API key from context or environment
-    const apiKey = process.env.STRIPE_API_KEY;
-    if (!apiKey) {
-      throw new Error("STRIPE_API_KEY environment variable is required");
-    }
-
-    // Initialize Stripe client
-    const stripe = new Stripe(apiKey);
+    const adopt = props.adopt ?? this.scope.adopt;
+    const stripe = await createStripeClient({ apiKey: props.apiKey });
 
     if (this.phase === "delete") {
       try {
@@ -211,27 +369,46 @@ export const Price = Resource(
           await stripe.prices.update(this.output.id, { active: false });
         }
       } catch (error) {
-        // Ignore if the price doesn't exist
-        console.error("Error deactivating price:", error);
+        handleStripeDeleteError(error, "Price", this.output?.id);
       }
 
       return this.destroy();
     }
+
+    // Validate tier-related constraints
+    if (props.tiers && props.billingScheme !== "tiered") {
+      throw new Error("Tiers can only be used with billingScheme: 'tiered'");
+    }
+
+    if (props.tiers && (props.unitAmount || props.unitAmountDecimal)) {
+      throw new Error("Cannot set both tiers and unitAmount/unitAmountDecimal");
+    }
+
+    if (props.tiersMode && !props.tiers) {
+      throw new Error("tiersMode requires tiers to be defined");
+    }
+
     try {
       let price: Stripe.Price;
 
       if (this.phase === "update" && this.output?.id) {
         // Update existing price (limited properties can be updated)
-        price = await stripe.prices.update(this.output.id, {
+        const updateParams: Stripe.PriceUpdateParams & { expand?: string[] } = {
           active: props.active,
           metadata: props.metadata,
           nickname: props.nickname,
           lookup_key: props.lookupKey,
           transfer_lookup_key: props.transferLookupKey,
-        });
+          expand: ["tiers"],
+        };
+
+        // Note: Stripe doesn't allow updating recurring fields (including meter) after price creation
+        // If meter needs to be changed, a new price must be created
+
+        price = await stripe.prices.update(this.output.id, updateParams);
       } else {
         // Create new price
-        const createParams: Stripe.PriceCreateParams = {
+        const createParams: Stripe.PriceCreateParams & { expand?: string[] } = {
           currency: props.currency,
           product: props.product,
           active: props.active,
@@ -241,6 +418,7 @@ export const Price = Resource(
           tax_behavior: props.taxBehavior,
           lookup_key: props.lookupKey,
           transfer_lookup_key: props.transferLookupKey,
+          expand: ["tiers"],
         };
 
         // Add unit amount fields
@@ -256,11 +434,81 @@ export const Price = Resource(
             interval: props.recurring.interval,
             interval_count: props.recurring.intervalCount,
             usage_type: props.recurring.usageType,
-            aggregate_usage: props.recurring.aggregateUsage,
+          };
+
+          // Add meter to recurring if present (only for metered usage type)
+          if (
+            props.recurring.usageType === "metered" &&
+            props.recurring.meter
+          ) {
+            (
+              createParams.recurring as Stripe.PriceCreateParams.Recurring & {
+                meter: string;
+              }
+            ).meter =
+              typeof props.recurring.meter === "string"
+                ? props.recurring.meter
+                : props.recurring.meter.id;
+          }
+        }
+
+        // Add tier configuration if present
+        if (props.tiers) {
+          createParams.tiers = props.tiers.map((tier) => ({
+            up_to: tier.upTo === "inf" ? "inf" : tier.upTo,
+            flat_amount: tier.flatAmount,
+            flat_amount_decimal: tier.flatAmountDecimal,
+            unit_amount: tier.unitAmount,
+            unit_amount_decimal: tier.unitAmountDecimal,
+          }));
+        }
+
+        if (props.tiersMode) {
+          createParams.tiers_mode = props.tiersMode;
+        }
+
+        // Add transform quantity if present
+        if (props.transformQuantity) {
+          createParams.transform_quantity = {
+            divide_by: props.transformQuantity.divideBy,
+            round: props.transformQuantity.round,
           };
         }
 
-        price = await stripe.prices.create(createParams);
+        if (props.lookupKey) {
+          const existingPrices = await stripe.prices.list({
+            lookup_keys: [props.lookupKey],
+            limit: 1,
+          });
+          if (existingPrices.data.length > 0) {
+            if (adopt) {
+              const existingPrice = existingPrices.data[0];
+              const updateParams: Stripe.PriceUpdateParams & {
+                expand?: string[];
+              } = {
+                active: props.active,
+                metadata: props.metadata,
+                nickname: props.nickname,
+                lookup_key: props.lookupKey,
+                transfer_lookup_key: props.transferLookupKey,
+                expand: ["tiers"],
+              };
+              price = await stripe.prices.update(
+                existingPrice.id,
+                updateParams,
+              );
+            } else {
+              // Need to retrieve with expanded tiers
+              price = await stripe.prices.retrieve(existingPrices.data[0].id, {
+                expand: ["tiers"],
+              });
+            }
+          } else {
+            price = await stripe.prices.create(createParams);
+          }
+        } else {
+          price = await stripe.prices.create(createParams);
+        }
       }
 
       // Transform Stripe recurring object to our format
@@ -271,13 +519,33 @@ export const Price = Resource(
             intervalCount: price.recurring.interval_count,
             usageType: price.recurring
               .usage_type as Stripe.PriceCreateParams.Recurring.UsageType,
-            aggregateUsage: price.recurring
-              .aggregate_usage as Stripe.PriceCreateParams.Recurring.AggregateUsage,
+            meter: (
+              price.recurring as Stripe.Price.Recurring & { meter?: string }
+            ).meter,
+          }
+        : undefined;
+
+      // Transform Stripe tiers array to our format
+      const tiers = price.tiers
+        ? price.tiers.map((tier) => ({
+            flatAmount: tier.flat_amount || undefined,
+            flatAmountDecimal: tier.flat_amount_decimal || undefined,
+            unitAmount: tier.unit_amount || undefined,
+            unitAmountDecimal: tier.unit_amount_decimal || undefined,
+            upTo: tier.up_to === null ? ("inf" as const) : tier.up_to!,
+          }))
+        : undefined;
+
+      // Transform transform_quantity if present
+      const transformQuantity = price.transform_quantity
+        ? {
+            divideBy: price.transform_quantity.divide_by,
+            round: price.transform_quantity.round as "up" | "down",
           }
         : undefined;
 
       // Map Stripe API response to our output format
-      return this({
+      return {
         id: price.id,
         product:
           typeof price.product === "string" ? price.product : price.product.id,
@@ -287,16 +555,19 @@ export const Price = Resource(
         active: price.active,
         billingScheme: price.billing_scheme as BillingScheme,
         nickname: price.nickname || undefined,
-        recurring: recurring,
+        recurring: recurring as PriceRecurring,
         metadata: price.metadata || undefined,
         taxBehavior: price.tax_behavior as TaxBehavior,
         createdAt: price.created,
         livemode: price.livemode,
         type: price.type as Stripe.Price.Type,
         lookupKey: price.lookup_key || undefined,
-      });
+        tiers: tiers,
+        tiersMode: price.tiers_mode ?? undefined,
+        transformQuantity: transformQuantity,
+      };
     } catch (error) {
-      console.error("Error creating/updating price:", error);
+      logger.error("Error creating/updating price:", error);
       throw error;
     }
   },

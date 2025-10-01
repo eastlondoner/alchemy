@@ -1,14 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { ignore } from "../util/ignore.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { ignore } from "../util/ignore.ts";
+import { logger } from "../util/logger.ts";
 
-import { alchemy } from "../alchemy.js";
-import type { FileCollection } from "./file-collection.js";
-import type { FileRef } from "./file-ref.js";
+import { alchemy } from "../alchemy.ts";
+import type { FileCollection } from "./file-collection.ts";
+import type { FileRef } from "./file-ref.ts";
 
-declare module "../alchemy.js" {
+declare module "../alchemy.ts" {
   interface Alchemy {
     /**
      * Creates a reference to a file in the filesystem.
@@ -110,7 +111,7 @@ alchemy.folder = async (dir: string, props?: { recursive?: boolean }) => {
 /**
  * Base file resource type
  */
-export interface File extends Resource<"fs::File"> {
+export interface File {
   /**
    * Path to the file
    */
@@ -176,21 +177,25 @@ export const File = Resource(
       this.output.path !== filePath
     ) {
       // If path has changed, delete the old file
-      console.log(
+      logger.log(
         `File: Path changed from ${this.output.path} to ${filePath}, removing old file`,
       );
       await ignore("ENOENT", async () => fs.promises.unlink(this.output.path));
     }
 
     // Create directory and write file
-    await fs.promises.mkdir(path.dirname(filePath), {
-      recursive: true,
-    });
+    const dirName = path.dirname(filePath);
+    if (dirName !== ".") {
+      await fs.promises.mkdir(dirName, {
+        recursive: true,
+      });
+    }
+
     await fs.promises.writeFile(filePath, props.content);
 
-    return this({
+    return {
       path: filePath,
       content: props.content,
-    });
+    };
   },
 );

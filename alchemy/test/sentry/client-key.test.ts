@@ -1,23 +1,25 @@
-import { describe, expect } from "bun:test";
-import { alchemy } from "../../src/alchemy.js";
-import { destroy } from "../../src/destroy.js";
-import { SentryApi } from "../../src/sentry/api.js";
-import { ClientKey } from "../../src/sentry/client-key.js";
-import { Project } from "../../src/sentry/project.js";
-import { Team } from "../../src/sentry/team.js";
-import { BRANCH_PREFIX } from "../util.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { destroy } from "../../src/destroy.ts";
+import { SentryApi } from "../../src/sentry/api.ts";
+import { ClientKey } from "../../src/sentry/client-key.ts";
+import { Project } from "../../src/sentry/project.ts";
+import { Team } from "../../src/sentry/team.ts";
+import { BRANCH_PREFIX } from "../util.ts";
 // must import this or else alchemy.test won't exist
-import "../../src/test/bun.js";
+import "../../src/test/vitest.ts";
 
 const api = new SentryApi();
 
-const test = alchemy.test(import.meta);
+const test = alchemy.test(import.meta, {
+  prefix: BRANCH_PREFIX,
+});
 
-describe("ClientKey Resource", () => {
+describe("ClientKey Resource", { concurrent: false }, () => {
   // Use BRANCH_PREFIX for deterministic, non-colliding resource names
   const testId = `${BRANCH_PREFIX}-test-key`;
-  const projectId = `${BRANCH_PREFIX}-test-project`;
-  const teamId = `${BRANCH_PREFIX}-test-team`;
+  const projectId = `${BRANCH_PREFIX}-test-project-client-key`;
+  const teamId = `${BRANCH_PREFIX}-test-team-client-key`;
   const organization = process.env.SENTRY_ORG;
   if (!organization) {
     throw new Error("SENTRY_ORG environment variable is required");
@@ -40,14 +42,14 @@ describe("ClientKey Resource", () => {
         name: `Test Project ${projectId}`,
         slug: projectId,
         platform: "node-express",
-        team: team.slug,
+        team: team.slug!,
         organization,
       });
 
       // Create a test client key
       key = await ClientKey(testId, {
         name: `Test Key ${testId}`,
-        project: project.slug,
+        project: project.slug!,
         organization,
       });
 
@@ -60,13 +62,13 @@ describe("ClientKey Resource", () => {
       );
       expect(getResponse.status).toEqual(200);
 
-      const responseData = await getResponse.json();
+      const responseData: any = await getResponse.json();
       expect(responseData.name).toEqual(`Test Key ${testId}`);
 
       // Update the key
       key = await ClientKey(testId, {
         name: `Updated Key ${testId}`,
-        project: project.slug,
+        project: project.slug!,
         organization,
       });
 
@@ -77,7 +79,7 @@ describe("ClientKey Resource", () => {
       const getUpdatedResponse = await api.get(
         `/projects/${key.organization}/${key.project}/keys/${key.id}/`,
       );
-      const updatedData = await getUpdatedResponse.json();
+      const updatedData: any = await getUpdatedResponse.json();
       expect(updatedData.name).toEqual(`Updated Key ${testId}`);
     } catch (err) {
       // log the error or else it's silently swallowed by destroy errors
@@ -114,21 +116,21 @@ describe("ClientKey Resource", () => {
         name: `Test Project ${projectId}`,
         slug: projectId,
         platform: "node-express",
-        team: team.slug,
+        team: team.slug!,
         organization,
       });
 
       // Create a test client key
       key = await ClientKey(testId, {
         name: `Test Key ${testId}`,
-        project: project.slug,
+        project: project.slug!,
         organization,
       });
 
       // Try to create the same key with adopt=true
       const adoptedKey = await ClientKey(testId, {
         name: `Test Key ${testId}`,
-        project: project.slug,
+        project: project.slug!,
         organization,
         adopt: true,
       });

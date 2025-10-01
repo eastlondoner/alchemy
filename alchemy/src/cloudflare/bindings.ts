@@ -3,22 +3,33 @@
  * Based on Cloudflare API documentation:
  * https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/
  */
-import type { Secret } from "../secret.js";
-import type { AiGateway } from "./ai-gateway.js";
-import type { Ai } from "./ai.js";
-import type { Assets } from "./assets.js";
-import type { Bound } from "./bound.js";
-import type { BrowserRendering } from "./browser-rendering.js";
-import type { R2Bucket } from "./bucket.js";
-import type { D1Database } from "./d1-database.js";
-import type { DurableObjectNamespace } from "./durable-object-namespace.js";
-import type { Hyperdrive } from "./hyperdrive.js";
-import type { KVNamespace } from "./kv-namespace.js";
-import type { Pipeline } from "./pipeline.js";
-import type { Queue } from "./queue.js";
-import type { VectorizeIndex } from "./vectorize-index.js";
-import type { Worker } from "./worker.js";
-import type { Workflow } from "./workflow.js";
+import type { Secret } from "../secret.ts";
+import type { Ai } from "./ai.ts";
+import type { AnalyticsEngineDataset } from "./analytics-engine.ts";
+import type { Assets } from "./assets.ts";
+import type { Bound } from "./bound.ts";
+import type { BrowserRendering } from "./browser-rendering.ts";
+import type { R2Bucket, R2BucketJurisdiction } from "./bucket.ts";
+import type { Container } from "./container.ts";
+import type { D1Database } from "./d1-database.ts";
+import type { DispatchNamespace } from "./dispatch-namespace.ts";
+import type { DurableObjectNamespace } from "./durable-object-namespace.ts";
+import type { HyperdriveRef } from "./hyperdrive-ref.ts";
+import type { Hyperdrive } from "./hyperdrive.ts";
+import type { Images } from "./images.ts";
+import type { KVNamespace } from "./kv-namespace.ts";
+import type { Pipeline } from "./pipeline.ts";
+import type { Queue } from "./queue.ts";
+import type { RateLimit } from "./rate-limit.ts";
+import type { SecretKey } from "./secret-key.ts";
+import type { SecretRef as CloudflareSecretRef } from "./secret-ref.ts";
+import type { Secret as CloudflareSecret } from "./secret.ts";
+import type { VectorizeIndex } from "./vectorize-index.ts";
+import type { VersionMetadata } from "./version-metadata.ts";
+import type { WorkerRef } from "./worker-ref.ts";
+import type { WorkerStub } from "./worker-stub.ts";
+import type { Worker } from "./worker.ts";
+import type { Workflow } from "./workflow.ts";
 
 export type Bindings = {
   [bindingName: string]: Binding;
@@ -35,29 +46,66 @@ export declare namespace Bindings {
  */
 export type Binding =
   | Ai
-  | AiGateway
   | Assets
+  | Container
+  | CloudflareSecret
+  | CloudflareSecretRef
   | D1Database
-  | DurableObjectNamespace
+  | DispatchNamespace
+  | AnalyticsEngineDataset
+  | DurableObjectNamespace<any>
   | Hyperdrive
+  | HyperdriveRef
+  | Images
   | KVNamespace
+  | Pipeline
+  | Queue
+  | RateLimit
+  | R2Bucket
   | {
       type: "kv_namespace";
       id: string;
     }
-  | Pipeline
-  | Queue
-  | R2Bucket
   | Secret
+  | SecretKey
   | string
   | VectorizeIndex
   | Worker
+  | WorkerStub
+  | WorkerRef
+  | WorkerEntrypoint
   | Workflow
   | BrowserRendering
-  | Self;
+  | VersionMetadata
+  | Self
+  | Json;
 
-export type Self = typeof Self;
-export const Self = Symbol.for("Self");
+export type Self<
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> = {
+  type: "cloudflare::Worker::Self";
+  __entrypoint__?: string;
+  __rpc__?: RPC;
+};
+export const Self = {
+  type: "cloudflare::Worker::Self",
+} as const;
+
+export type WorkerEntrypoint = (Worker | WorkerRef) & {
+  __entrypoint__?: string;
+};
+
+export type Json<T = any> = {
+  type: "json";
+  json: T;
+};
+
+export function Json<const T>(value: T): Json<T> {
+  return {
+    type: "json",
+    json: value,
+  };
+}
 
 /**
  * Union type for all Worker binding types (API spec)
@@ -71,14 +119,19 @@ export type WorkerBindingSpec =
   | WorkerBindingDispatchNamespace
   | WorkerBindingDurableObjectNamespace
   | WorkerBindingHyperdrive
+  | WorkerBindingImages
   | WorkerBindingJson
   | WorkerBindingKVNamespace
   | WorkerBindingMTLSCertificate
   | WorkerBindingPipeline
   | WorkerBindingPlainText
   | WorkerBindingQueue
+  | WorkerBindingRateLimit
   | WorkerBindingR2Bucket
+  | WorkerBindingSecretKey
   | WorkerBindingSecretText
+  | WorkerBindingSecretsStore
+  | WorkerBindingSecretsStoreSecret
   | WorkerBindingService
   | WorkerBindingStaticContent
   | WorkerBindingTailConsumer
@@ -199,7 +252,7 @@ export interface WorkerBindingJson {
   /** Type identifier for JSON binding */
   type: "json";
   /** JSON value */
-  json: any;
+  json: string;
 }
 
 /**
@@ -251,6 +304,25 @@ export interface WorkerBindingQueue {
 }
 
 /**
+ * Rate Limit binding type
+ */
+export interface WorkerBindingRateLimit {
+  /** The name of the binding */
+  name: string;
+  /** Type identifier for Rate Limit binding */
+  type: "ratelimit";
+  /** Namespace ID for the rate limit */
+  namespace_id: string;
+  /** Simple rate limiting configuration */
+  simple: {
+    /** Maximum number of requests */
+    limit: number;
+    /** Time period in seconds */
+    period: 60 | 10;
+  };
+}
+
+/**
  * R2 Bucket binding type
  */
 export interface WorkerBindingR2Bucket {
@@ -260,6 +332,37 @@ export interface WorkerBindingR2Bucket {
   type: "r2_bucket";
   /** Bucket name */
   bucket_name: string;
+  /** Jurisdiction */
+  jurisdiction?: R2BucketJurisdiction;
+}
+
+/**
+ * Secret Key binding type
+ */
+export interface WorkerBindingSecretKey {
+  /** The name of the binding */
+  name: string;
+  /** Type identifier for Secret Key binding */
+  type: "secret_key";
+  /** Algorithm-specific key parameters */
+  algorithm: unknown;
+  /** Data format of the key */
+  format: "raw" | "pkcs8" | "spki" | "jwk";
+  /** Allowed operations with the key */
+  usages: Array<
+    | "encrypt"
+    | "decrypt"
+    | "sign"
+    | "verify"
+    | "deriveKey"
+    | "deriveBits"
+    | "wrapKey"
+    | "unwrapKey"
+  >;
+  /** Base64-encoded key data. Required if format is "raw", "pkcs8", or "spki" */
+  key_base64?: string;
+  /** Key data in JSON Web Key format. Required if format is "jwk" */
+  key_jwk?: unknown;
 }
 
 /**
@@ -272,6 +375,31 @@ export interface WorkerBindingSecretText {
   type: "secret_text";
   /** Secret value */
   text: string;
+}
+
+export interface WorkerBindingSecretsStore {
+  /** The name of the binding */
+  name: string;
+  /** Type identifier for Secrets Store binding */
+  type: "secrets_store";
+  /** Store ID */
+  store_id: string;
+  /** Secret name */
+  secret_name: string;
+}
+
+/**
+ * Secrets Store Secret binding type for individual secrets
+ */
+export interface WorkerBindingSecretsStoreSecret {
+  /** The name of the binding */
+  name: string;
+  /** Type identifier for Secrets Store Secret binding */
+  type: "secrets_store_secret";
+  /** Store ID */
+  store_id: string;
+  /** Secret name */
+  secret_name: string;
 }
 
 /**
@@ -288,6 +416,8 @@ export interface WorkerBindingService {
   environment?: string;
   /** Service namespace */
   namespace?: string;
+  /** Service entrypoint */
+  entrypoint?: string;
 }
 
 /**
@@ -362,6 +492,16 @@ export interface WorkerBindingWorkflow {
    * @default - the name of the script it is bound to
    */
   script_name?: string;
+}
+
+/**
+ * Images binding type
+ */
+export interface WorkerBindingImages {
+  /** The name of the binding */
+  name: string;
+  /** Type identifier for Images binding */
+  type: "images";
 }
 
 /**

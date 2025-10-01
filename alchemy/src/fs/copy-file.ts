@@ -1,7 +1,8 @@
 import fs from "node:fs";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { ignore } from "../util/ignore.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { ignore } from "../util/ignore.ts";
+import { logger } from "../util/logger.ts";
 
 /**
  * Properties for creating a CopyFile resource
@@ -27,7 +28,7 @@ export interface CopyFileProps {
 /**
  * Output returned after CopyFile creation/update
  */
-export interface CopyFile extends Resource<"fs::CopyFile">, CopyFileProps {
+export interface CopyFile extends CopyFileProps {
   /**
    * Time at which the object was created
    */
@@ -63,7 +64,7 @@ export const CopyFile = Resource(
   "fs::CopyFile",
   async function (
     this: Context<CopyFile>,
-    id: string,
+    _id: string,
     props: CopyFileProps,
   ): Promise<CopyFile> {
     const { src, dest, overwrite = true } = props;
@@ -99,15 +100,15 @@ export const CopyFile = Resource(
         await fs.promises.copyFile(src, dest);
       }
 
-      return this({
+      return {
         src,
         dest,
         overwrite,
         copied: true,
         createdAt: Date.now(),
-      });
+      };
     } catch (error) {
-      console.error(`Error copying file from ${src} to ${dest}:`, error);
+      logger.error("Error copying file:", error);
       throw error;
     }
   },

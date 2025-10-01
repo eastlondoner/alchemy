@@ -4,26 +4,26 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "tsc -b && vite build",
-    "deploy": "bun run --env-file ../../.env ./alchemy.run.ts",
-    "destroy": "bun run --env-file ../../.env ./alchemy.run.ts --destroy",
+    "deploy": "alchemy deploy --env-file ../../.env",
+    "destroy": "alchemy destroy --env-file ../../.env",
+    "dev": "alchemy dev --env-file ../../.env",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@openauthjs/openauth": "^0.4.3",
+    "hono": "^4.9.2",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "valibot": "^1.0.0"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.0.4",
+    "@cloudflare/vite-plugin": "catalog:",
     "@eslint/js": "^9.21.0",
     "@types/node": "^22.13.10",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "alchemy": "workspace:*",
     "cloudflare": "^4.2.0",
     "dotenv": "^16.4.7",
     "eslint": "^9.21.0",
@@ -31,8 +31,8 @@
     "eslint-plugin-react-refresh": "^0.4.19",
     "globals": "^15.15.0",
     "tsx": "^4.19.3",
-    "typescript": "~5.7.2",
+    "typescript": "catalog:",
     "typescript-eslint": "^8.24.1",
-    "vite": "^6.2.0"
+    "vite": "catalog:"
   }
 }

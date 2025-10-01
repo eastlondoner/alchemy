@@ -1,15 +1,20 @@
 {
   "extends": "../tsconfig.base.json",
-  "include": ["src/**/*"],
+  "include": ["package.json", "src/**/*.ts", "src/**/*.js", "src/**/*.tsx"],
   "compilerOptions": {
+    "types": ["@cloudflare/workers-types"],
     "composite": true,
     "noEmit": false,
     "outDir": "./lib",
     "rootDir": "./src",
     "sourceMap": true,
     "declarationMap": true,
+    "declaration": true,
     "module": "Preserve",
     "moduleResolution": "Bundler",
-    "target": "ESNext"
+    "target": "ESNext",
+    "allowJs": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true
   }
 }

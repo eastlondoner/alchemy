@@ -1,14 +1,46 @@
 {
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
+    "ignoreUnknown": true,
     "includes": [
-      "./alchemy/src/**",
-      "./alchemy/test/**",
-      "./scripts/**",
-      "./stacks/**",
-      "./examples/*/src/**",
-      "./examples/*/alchemy.run.ts",
-      "!**/node_modules"
-    ]
+      "./src/**/*.ts",
+      "./**/package.json",
+      "./**/biome.json",
+      "./alchemy/bin/**/*.ts",
+      "./alchemy/src/**/*.ts",
+      "./alchemy/workers/**/*.ts",
+      "./alchemy/scripts/**/*.ts",
+      "./alchemy/src/**/*.tsx",
+      "./alchemy/src/**/*.js",
+      "./alchemy/test/**/*.ts",
+      "./alchemy-web/**/*.ts",
+      "./alchemy-web/**/*.js",
+      "./alchemy-web/**/*.mjs",
+      "./scripts/**/*.ts",
+      "./stacks/**/*.ts",
+      "./examples/*/src/**/*.ts",
+      "./examples/*/test/**/*.ts",
+      "./tests/*/**/*.ts",
+      "./examples/*/*.ts",
+      "!**/node_modules",
+      "!examples/cloudflare-tanstack-start/src/routeTree.gen.ts",
+      "!examples/cloudflare-redwood/worker-configuration.d.ts",
+      "!./alchemy/src/aws/control/types.ts",
+      "!examples/cloudflare-tanstack-start/.output/",
+      "!examples/cloudflare-nuxt-pipeline/.output/",
+      "!./alchemy/lib/",
+      "!**/*.gen.ts",
+      "alchemy/src/{neon,planetscale}/api/*.ts",
+      "monorepo/**/*.ts",
+      "monorepo/**/*.tsx",
+      "monorepo/**/*.json"
+    ],
+    "experimentalScannerIgnores": ["!**/node_modules", "./alchemy/lib/**"]
   },
   "assist": {
     "actions": {
@@ -25,7 +57,7 @@
         "useImportExtensions": {
           "level": "error",
           "options": {
-            "forceJsExtensions": true
+            "forceJsExtensions": false
           }
         },
         "noUnsafeFinally": "off",
@@ -45,14 +77,16 @@
         "noExplicitAny": "off",
         "noImplicitAnyLet": "off",
         "noAssignInExpressions": "off",
-        "noShadowRestrictedNames": "off"
+        "noShadowRestrictedNames": "off",
+        "noEmptyInterface": "off",
+        "noRedeclare": "off",
+        "noControlCharactersInRegex": "off",
+        "noConfusingVoidType": "off"
       },
       "style": {
         "useLiteralEnumMembers": "error",
-        "noCommaOperator": "error",
         "useNodejsImportProtocol": "error",
         "useAsConstAssertion": "error",
-        "useNumericLiterals": "error",
         "useEnumInitializers": "error",
         "useSelfClosingElements": "error",
         "useConst": "off",
@@ -65,11 +99,21 @@
         "noParameterAssign": "off",
         "noNonNullAssertion": "off",
         "useDefaultParameterLast": "error",
-        "noArguments": "error",
         "useImportType": "error",
         "useExportType": "error",
         "noUselessElse": "off",
-        "useShorthandFunctionType": "error"
+        "useShorthandFunctionType": "error",
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "picocolors": {
+                "allowImportNames": ["default"],
+                "message": "picocolors is a CJS module, import default module as 'pc'"
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -80,7 +124,7 @@
     "indentWidth": 2,
     "lineWidth": 80,
     "lineEnding": "lf",
-    "includes": ["**", "!**/node_modules/**"]
+    "includes": ["**", "!**/node_modules/**", "!**/*.d.ts", "!**/*.mdx"]
   },
   "javascript": {
     "formatter": {

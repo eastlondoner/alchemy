@@ -1,55 +1,83 @@
-import { alchemy } from "./alchemy.js";
-import { context } from "./context.js";
+import { alchemy } from "./alchemy.ts";
+import { context } from "./context.ts";
 import {
-  PROVIDERS,
+  resolveDeletionHandler,
+  type Resource,
   ResourceFQN,
   ResourceID,
   ResourceKind,
+  type ResourceProps,
   ResourceScope,
   ResourceSeq,
-  type Provider,
-  type Resource,
-} from "./resource.js";
-import { Scope } from "./scope.js";
+} from "./resource.ts";
+import { isScope, type PendingDeletions, Scope } from "./scope.ts";
+import type { State } from "./state.ts";
+import { formatFQN } from "./util/cli.ts";
+import { logger } from "./util/logger.ts";
 
-export class DestroyedSignal extends Error {}
+export function isDestroyedSignal(error: any): error is DestroyedSignal {
+  return error instanceof Error && (error as any).kind === "DestroyedSignal";
+}
+
+export class DestroyedSignal extends Error {
+  readonly kind = "DestroyedSignal";
+  constructor(public readonly noop: boolean) {
+    super();
+  }
+}
+
+export type DestroyStrategy = "sequential" | "parallel";
+
+export const DestroyStrategy = Symbol.for("alchemy::DestroyStrategy");
 
 export interface DestroyOptions {
   quiet?: boolean;
-  strategy?: "sequential" | "parallel";
+  strategy?: DestroyStrategy;
+  replace?: {
+    props?: ResourceProps | undefined;
+    output?: Resource<string>;
+  };
+  /**
+   * If true, children of the resource will not be destroyed (but their state will be deleted).
+   */
+  noop?: boolean;
 }
 
 function isScopeArgs(a: any): a is [scope: Scope, options?: DestroyOptions] {
-  return a[0] instanceof Scope;
+  return isScope(a[0]);
 }
 
 /**
  * Prune all resources from an Output and "down", i.e. that branches from it.
  */
-export async function destroy<Type extends string>(
+export async function destroy(
   ...args:
     | [scope: Scope, options?: DestroyOptions]
-    | [resource: Resource<Type> | undefined | null, options?: DestroyOptions]
+    | [resource: any | undefined | null, options?: DestroyOptions]
 ): Promise<void> {
   if (isScopeArgs(args)) {
     const [scope] = args;
     const options = {
-      strategy: "sequential",
+      strategy: scope.destroyStrategy ?? "sequential",
       ...(args[1] ?? {}),
     } satisfies DestroyOptions;
 
-    // destroy all active resources
-    await destroy.all(Array.from(scope.resources.values()), options);
+    await scope.run(async () => {
+      // destroy all active and pending resources
+      await scope.destroyPendingDeletions();
+      await destroyAll(Array.from(scope.resources.values()), options);
 
-    // then detect orphans and destroy them
-    const orphans = await scope.state.all();
-    await destroy.all(
-      Object.values(orphans).map((orphan) => ({
-        ...orphan.output,
-        Scope: scope,
-      })),
-      options,
-    );
+      // then detect orphans and destroy them
+      const orphans = await scope.state.all();
+      await destroyAll(
+        Object.values(orphans).map((orphan) => ({
+          ...orphan.output,
+          Scope: scope,
+        })),
+        options,
+      );
+    });
+
     // finally, destroy the scope container
     await scope.deinit();
     return;
@@ -66,36 +94,57 @@ export async function destroy<Type extends string>(
       parent: instance[ResourceScope],
       scopeName: instance[ResourceID],
     });
-    console.log("Destroying scope", scope.chain.join("/"));
     return await destroy(scope, options);
   }
 
-  const Provider: Provider<Type> | undefined = PROVIDERS.get(
-    instance[ResourceKind],
-  );
+  const Provider = resolveDeletionHandler(instance[ResourceKind]);
   if (!Provider) {
     throw new Error(
-      `Cannot destroy resource "${instance[ResourceFQN]}" type ${instance[ResourceKind]} - no provider found. You may need to import the provider in your alchemy.config.ts.`,
+      `Cannot destroy resource "${instance[ResourceFQN]}" type ${instance[ResourceKind]} - no provider found. You may need to import the provider in your alchemy.run.ts.`,
     );
   }
 
   const scope = instance[ResourceScope];
   if (!scope) {
-    console.warn(`Resource "${instance[ResourceFQN]}" has no scope`);
+    logger.warn(`Resource "${instance[ResourceFQN]}" has no scope`);
   }
   const quiet = options?.quiet ?? scope.quiet;
 
   try {
-    if (!quiet) {
-      console.log(`Delete:  "${instance[ResourceFQN]}"`);
+    if (!quiet && !options?.noop) {
+      logger.task(instance[ResourceFQN], {
+        prefix: options?.replace ? "cleanup" : "deleting",
+        prefixColor: options?.replace ? "magenta" : "redBright",
+        resource: formatFQN(instance[ResourceFQN]),
+        message: options?.replace
+          ? "Cleaning Up Old Resource..."
+          : "Deleting Resource...",
+      });
     }
 
-    const state = await scope.state.get(instance[ResourceID]);
-
-    if (state === undefined) {
-      return;
+    let state: State;
+    let props: ResourceProps | undefined;
+    if (options?.replace) {
+      props = options.replace.props;
+      state = {
+        output: options.replace.output!,
+        status: "deleting",
+        oldProps: options.replace.props,
+        data: {},
+        kind: instance[ResourceKind],
+        id: instance[ResourceID],
+        fqn: instance[ResourceFQN],
+        seq: instance[ResourceSeq],
+        props,
+      };
+    } else {
+      const _state = await scope.state.get(instance[ResourceID]);
+      if (_state === undefined) {
+        return;
+      }
+      state = _state;
+      props = state.props;
     }
-
     const ctx = context({
       scope,
       phase: "delete",
@@ -103,14 +152,18 @@ export async function destroy<Type extends string>(
       id: instance[ResourceID],
       fqn: instance[ResourceFQN],
       seq: instance[ResourceSeq],
-      props: state.props,
+      props,
       state,
+      // TODO(sam|michael): should this always be false or !!options?.replace
+      isReplacement: false,
       replace: () => {
         throw new Error("Cannot replace a resource that is being deleted");
       },
     });
 
     let nestedScope: Scope | undefined;
+    let noop = options?.noop ?? false;
+
     try {
       // BUG: this does not restore persisted scope
       await alchemy.run(
@@ -119,17 +172,20 @@ export async function destroy<Type extends string>(
           // TODO(sam): this is an awful hack to differentiate between naked scopes and resources
           isResource: instance[ResourceKind] !== "alchemy::Scope",
           parent: scope,
+          destroyStrategy: instance[DestroyStrategy] ?? "sequential",
+          noop,
         },
         async (scope) => {
-          nestedScope = scope;
-          return await Provider.handler.bind(ctx)(
-            instance[ResourceID],
-            state.props,
-          );
+          nestedScope = options?.replace?.props == null ? scope : undefined;
+          if (noop) {
+            return ctx.destroy(noop);
+          }
+          return Provider.handler.bind(ctx)(instance[ResourceID], ctx.props);
         },
       );
     } catch (err) {
-      if (err instanceof DestroyedSignal) {
+      if (isDestroyedSignal(err)) {
+        noop = noop || err.noop;
         // TODO: should we fail if the DestroyedSignal is not thrown?
       } else {
         throw err;
@@ -137,41 +193,56 @@ export async function destroy<Type extends string>(
     }
 
     if (nestedScope) {
-      await destroy(nestedScope, options);
+      await destroy(nestedScope, {
+        ...options,
+        noop,
+        strategy: instance[DestroyStrategy] ?? "sequential",
+      });
     }
 
-    await scope.delete(instance[ResourceID]);
+    if (options?.replace == null) {
+      await scope.deleteResource(instance[ResourceID]);
+    } else {
+      let pendingDeletions =
+        await state.output[ResourceScope].get<PendingDeletions>(
+          "pendingDeletions",
+        );
+      pendingDeletions = pendingDeletions?.filter(
+        (deletion) => deletion.resource[ResourceID] !== instance[ResourceID],
+      );
+      await scope.set("pendingDeletions", pendingDeletions);
+    }
 
-    if (!quiet) {
-      console.log(`Deleted: "${instance[ResourceFQN]}"`);
+    if (!quiet && !options?.noop) {
+      logger.task(instance[ResourceFQN], {
+        prefix: options?.replace ? "cleaned" : "deleted",
+        prefixColor: "greenBright",
+        resource: formatFQN(instance[ResourceFQN]),
+        message: options?.replace
+          ? "Old Resource Cleanup Complete"
+          : "Deleted Resource",
+        status: "success",
+      });
     }
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     throw error;
   }
 }
 
-export namespace destroy {
-  export async function all(resources: Resource[], options?: DestroyOptions) {
-    if (options?.strategy !== "parallel") {
-      const sorted = resources.sort((a, b) => b[ResourceSeq] - a[ResourceSeq]);
-      for (const resource of sorted) {
-        await destroy(resource, options);
+export async function destroyAll(
+  resources: Resource[],
+  options?: DestroyOptions & { force?: boolean },
+) {
+  if (options?.strategy !== "parallel") {
+    const sorted = resources.sort((a, b) => b[ResourceSeq] - a[ResourceSeq]);
+    for (const resource of sorted) {
+      if (isScope(resource)) {
+        await resource.destroyPendingDeletions();
       }
-    } else {
-      await Promise.all(
-        resources.map((resource) => destroy(resource, options)),
-      );
+      await destroy(resource, options);
     }
-  }
-
-  export async function sequentially(
-    ...resources: (Resource<string> | undefined | null)[]
-  ) {
-    for (const resource of resources) {
-      if (resource) {
-        await destroy(resource);
-      }
-    }
+  } else {
+    await Promise.all(resources.map((resource) => destroy(resource, options)));
   }
 }

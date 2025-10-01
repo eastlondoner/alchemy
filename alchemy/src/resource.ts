@@ -1,8 +1,56 @@
-import { apply } from "./apply.js";
-import type { Context } from "./context.js";
-import { Scope as _Scope } from "./scope.js";
+import { apply } from "./apply.ts";
+import type { Context } from "./context.ts";
+import { DestroyStrategy } from "./destroy.ts";
+import { Scope as _Scope, type Scope } from "./scope.ts";
 
-export const PROVIDERS = new Map<ResourceKind, Provider<string, any>>();
+declare global {
+  var ALCHEMY_PROVIDERS: Map<ResourceKind, Provider<string, any>>;
+  var ALCHEMY_HANDLERS: Map<ResourceKind, ResourceLifecycleHandler>;
+  var ALCHEMY_DYNAMIC_RESOURCE_RESOLVERS: DynamicResourceResolver[];
+}
+
+export const PROVIDERS: Map<
+  ResourceKind,
+  Provider<string, any>
+> = (globalThis.ALCHEMY_PROVIDERS ??= new Map<
+  ResourceKind,
+  Provider<string, any>
+>());
+const HANDLERS: Map<ResourceKind, ResourceLifecycleHandler> =
+  (globalThis.ALCHEMY_HANDLERS ??= new Map<
+    ResourceKind,
+    ResourceLifecycleHandler
+  >());
+
+const DYNAMIC_RESOURCE_RESOLVERS: DynamicResourceResolver[] =
+  (globalThis.ALCHEMY_DYNAMIC_RESOURCE_RESOLVERS ??= []);
+
+export type DynamicResourceResolver = (
+  typeName: string,
+) => Provider | undefined;
+
+/**
+ * Register a function that will be called if a Resource Type cannot be found during deletion.
+ */
+export function registerDynamicResource(
+  handler: DynamicResourceResolver,
+): void {
+  DYNAMIC_RESOURCE_RESOLVERS.push(handler);
+}
+
+export function resolveDeletionHandler(typeName: string): Provider | undefined {
+  const provider: Provider<string, any> | undefined = PROVIDERS.get(typeName);
+  if (provider) {
+    return provider;
+  }
+  for (const handler of DYNAMIC_RESOURCE_RESOLVERS) {
+    const result = handler(typeName);
+    if (result) {
+      return result;
+    }
+  }
+  return undefined;
+}
 
 export type ResourceID = string;
 export const ResourceID = Symbol.for("alchemy::ResourceID");
@@ -18,9 +66,20 @@ export interface ProviderOptions {
    * If true, the resource will be updated even if the inputs have not changed.
    */
   alwaysUpdate: boolean;
+
+  /**
+   * The strategy to use when destroying the resource.
+   *
+   * @default "sequential"
+   */
+  destroyStrategy?: DestroyStrategy;
 }
 
 export type ResourceProps = {
+  [key: string]: any;
+};
+
+export type ResourceAttributes = {
   [key: string]: any;
 };
 
@@ -34,35 +93,22 @@ export type Provider<
     handler: F;
   };
 
-export type PendingResource<
-  Out = unknown,
-  Kind extends ResourceKind = ResourceKind,
-  ID extends ResourceID = ResourceID,
-  FQN extends ResourceFQN = ResourceFQN,
-  Scope extends _Scope = _Scope,
-  Seq extends number = number,
-> = Promise<Out> & {
-  [ResourceKind]: Kind;
-  [ResourceID]: ID;
-  [ResourceFQN]: FQN;
+export interface PendingResource<Out = unknown> extends Promise<Out> {
+  [ResourceKind]: ResourceKind;
+  [ResourceID]: ResourceID;
+  [ResourceFQN]: ResourceFQN;
   [ResourceScope]: Scope;
-  [ResourceSeq]: Seq;
-};
+  [ResourceSeq]: number;
+  [DestroyStrategy]: DestroyStrategy;
+}
 
-export interface Resource<
-  // give each name types for syntax highlighting (differentiation)
-  Kind extends ResourceKind = ResourceKind,
-  ID extends ResourceID = ResourceID,
-  FQN extends ResourceFQN = ResourceFQN,
-  Scope extends _Scope = _Scope,
-  Seq extends number = number,
-> {
-  // use capital letters to avoid collision with conventional camelCase typescript properties
+export interface Resource<Kind extends ResourceKind = ResourceKind> {
   [ResourceKind]: Kind;
-  [ResourceID]: ID;
-  [ResourceFQN]: FQN;
+  [ResourceID]: ResourceID;
+  [ResourceFQN]: ResourceFQN;
   [ResourceScope]: Scope;
-  [ResourceSeq]: Seq;
+  [ResourceSeq]: number;
+  [DestroyStrategy]: DestroyStrategy;
 }
 
 // helper for semantic syntax highlighting (color as a type/class instead of function/value)
@@ -74,7 +120,7 @@ type ResourceLifecycleHandler = (
   this: Context<any, any>,
   id: string,
   props: any,
-) => Promise<Resource<string>>;
+) => Promise<ResourceAttributes>;
 
 // see: https://x.com/samgoodwin89/status/1904640134097887653
 type Handler<F extends (...args: any[]) => any> =
@@ -95,17 +141,27 @@ export function Resource<
   const Type extends ResourceKind,
   F extends ResourceLifecycleHandler,
 >(type: Type, ...args: [Partial<ProviderOptions>, F] | [F]): Handler<F> {
-  if (PROVIDERS.has(type)) {
-    throw new Error(`Resource ${type} already exists`);
-  }
   const [options, handler] = args.length === 2 ? args : [undefined, args[0]];
+  if (PROVIDERS.has(type)) {
+    // We want Alchemy to work in a PNPM monorepo environment unfortunately,
+    // global registries do not work because PNPM's symlinks result in multiple
+    // instances of alchemy being loaded even if the package version is the
+    // same (peers do not fix this).
+    // MITIGATION: to ensure that most cases of accidental double-registration
+    // are caught, we're going to check the handler's toString() to see if it's
+    // the same as the previous handler. if it is, we're going to overwrite it.
+    if (HANDLERS.get(type)!.toString() !== handler.toString()) {
+      throw new Error(`Resource ${type} already exists`);
+    }
+  }
+  HANDLERS.set(type, handler);
 
   type Out = Awaited<ReturnType<F>>;
 
-  const provider = ((
+  const provider = (async (
     resourceID: string,
     props: ResourceProps,
-  ): Promise<Resource<string>> => {
+  ): Promise<ResourceAttributes> => {
     const scope = _Scope.current;
 
     if (resourceID.includes(":")) {
@@ -119,13 +175,16 @@ export function Resource<
       const otherResource = scope.resources.get(resourceID);
       if (otherResource?.[ResourceKind] !== type) {
         scope.fail();
-        throw new Error(
+        const error = new Error(
           `Resource ${resourceID} already exists in the stack and is of a different type: '${otherResource?.[ResourceKind]}' !== '${type}'`,
         );
+        scope.telemetryClient.record({
+          event: "resource.error",
+          resource: type,
+          error,
+        });
+        throw error;
       }
-      // console.warn(
-      //   `Resource ${resourceID} already exists in the stack: ${scope.chain.join("/")}`,
-      // );
     }
 
     // get a sequence number (unique within the scope) for the resource
@@ -136,6 +195,7 @@ export function Resource<
       [ResourceFQN]: scope.fqn(resourceID),
       [ResourceSeq]: seq,
       [ResourceScope]: scope,
+      [DestroyStrategy]: options?.destroyStrategy ?? "sequential",
     } as any as PendingResource<Out>;
     const promise = apply(meta, props, options);
     const resource = Object.assign(promise, meta);

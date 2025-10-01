@@ -1,6 +1,6 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { createCloudflareApi, type CloudflareApiOptions } from "./api.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { createCloudflareApi, type CloudflareApiOptions } from "./api.ts";
 
 /**
  * Cloudflare permission group as returned by the API
@@ -45,7 +45,7 @@ export type R2PermissionGroups =
  *
  * @see https://developers.cloudflare.com/r2/api/tokens/#permissions
  */
-export type PermissionGroups = Resource<"cloudflare::PermissionGroups"> & {
+export type PermissionGroups = {
   /**
    * Admin Read & Write - Allows create, list, delete buckets and edit bucket configurations
    * plus list, write, and read object access
@@ -110,7 +110,7 @@ export const PermissionGroups = Resource(
   "cloudflare::PermissionGroups",
   async function (
     this: Context<PermissionGroups>,
-    id: string,
+    _id: string,
     options: CloudflareApiOptions = {},
   ): Promise<PermissionGroups> {
     // Only create and update phases are supported
@@ -140,10 +140,8 @@ export const PermissionGroups = Resource(
       );
     }
 
-    return this(
-      Object.fromEntries(
-        data.result.map((group) => [group.name, group]),
-      ) as PermissionGroups,
-    );
+    return Object.fromEntries(
+      data.result.map((group) => [group.name, group]),
+    ) as PermissionGroups;
   },
 );

@@ -1,11 +1,10 @@
-import { alchemy } from "../alchemy.js";
-import type { Secret } from "../secret.js";
-import { withExponentialBackoff } from "../util/retry.js";
-import {
-  getCloudflareAuthHeaders,
-  type CloudflareAuthOptions,
-} from "./auth.js";
-import { getCloudflareAccounts, getUserEmailFromApiKey } from "./user.js";
+import { Provider, type Credentials } from "../auth.ts";
+import type { Secret } from "../secret.ts";
+import { memoize } from "../util/memoize.ts";
+import { withExponentialBackoff } from "../util/retry.ts";
+import { safeFetch } from "../util/safe-fetch.ts";
+import { CloudflareAuth } from "./auth.ts";
+import { getCloudflareAccountId, getUserEmailFromApiKey } from "./user.ts";
 
 /**
  * Options for Cloudflare API requests
@@ -17,6 +16,17 @@ export interface CloudflareApiOptions {
    * @default https://api.cloudflare.com/client/v4
    */
   baseUrl?: string;
+
+  /**
+   * The Alchemy profile to use for Cloudflare credentials. Defaults to:
+   * - `process.env.CLOUDFLARE_PROFILE`
+   * - `process.env.ALCHEMY_PROFILE`
+   * - `"default"`
+   *
+   * If an API key or token is provided in these options or in the environment,
+   * the profile will be ignored.
+   */
+  profile?: string;
 
   /**
    * API Key to use (overrides CLOUDFLARE_API_KEY env var)
@@ -47,58 +57,90 @@ export interface CloudflareApiOptions {
  * @param options API options
  * @returns Promise resolving to a CloudflareApi instance
  */
-export async function createCloudflareApi(
-  options: Partial<CloudflareApiOptions> = {},
-): Promise<CloudflareApi> {
-  const apiKey =
-    options.apiKey ??
-    (process.env.CLOUDFLARE_API_KEY
-      ? alchemy.secret(process.env.CLOUDFLARE_API_KEY)
-      : undefined);
-  const apiToken =
-    options.apiToken ??
-    (process.env.CLOUDFLARE_API_TOKEN
-      ? alchemy.secret(process.env.CLOUDFLARE_API_TOKEN)
-      : undefined);
-  let email = options.email ?? process.env.CLOUDFLARE_EMAIL;
-  if (apiKey && !email) {
-    email = await getUserEmailFromApiKey(apiKey.unencrypted);
-  }
-  const accountId =
-    options.accountId ??
-    process.env.CLOUDFLARE_ACCOUNT_ID ??
-    process.env.CF_ACCOUNT_ID ??
-    (
-      await getCloudflareAccounts({
+export const createCloudflareApi = memoize(
+  async (options: CloudflareApiOptions = {}) => {
+    const baseUrl = options.baseUrl ?? process.env.CLOUDFLARE_BASE_URL;
+    const apiKey =
+      options.apiKey?.unencrypted ?? process.env.CLOUDFLARE_API_KEY;
+    const apiToken =
+      options.apiToken?.unencrypted ?? process.env.CLOUDFLARE_API_TOKEN;
+    const email = options.email ?? process.env.CLOUDFLARE_EMAIL;
+    const accountId =
+      options.accountId ??
+      process.env.CLOUDFLARE_ACCOUNT_ID ??
+      process.env.CF_ACCOUNT_ID;
+
+    if (apiKey) {
+      const credentials: Credentials.ApiKey = {
+        type: "api-key",
         apiKey,
+        email: email ?? (await getUserEmailFromApiKey(apiKey)),
+      };
+      return new CloudflareApi({
+        baseUrl: options.baseUrl,
+        credentials,
+        accountId: accountId ?? (await getCloudflareAccountId(credentials)),
+      });
+    }
+
+    if (apiToken) {
+      const credentials: Credentials.ApiToken = {
+        type: "api-token",
         apiToken,
-        email,
-      } as CloudflareAuthOptions)
-    )[0]?.id;
-  if (accountId === undefined) {
-    throw new Error(
-      "Either accountId or CLOUDFLARE_ACCOUNT_ID must be provided",
-    );
-  }
-  return new CloudflareApi({
-    baseUrl: options.baseUrl,
-    accountId,
-    email,
-    apiKey,
-    apiToken,
-  });
-}
+      };
+      return new CloudflareApi({
+        baseUrl,
+        credentials,
+        accountId: accountId ?? (await getCloudflareAccountId(credentials)),
+      });
+    }
+
+    try {
+      const profile =
+        options.profile ??
+        process.env.CLOUDFLARE_PROFILE ??
+        process.env.ALCHEMY_PROFILE ??
+        "default";
+      const { provider, credentials } =
+        await Provider.getWithCredentials<CloudflareAuth.Metadata>({
+          provider: "cloudflare",
+          profile,
+        });
+      return new CloudflareApi({
+        baseUrl,
+        profile,
+        credentials,
+        accountId: provider.metadata.id,
+      });
+    } catch (error) {
+      throw new Error(
+        [
+          "No credentials found. Please run `alchemy login`, or set either CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY in your environment.",
+          "Learn more: https://alchemy.run/guides/cloudflare/",
+        ].join("\n"),
+        { cause: error },
+      );
+    }
+  },
+  (options = {}) =>
+    [
+      options.baseUrl,
+      options.profile,
+      options.apiKey?.unencrypted,
+      options.apiToken?.unencrypted,
+      options.accountId,
+      options.email,
+    ].join("|"),
+);
 
 /**
  * Cloudflare API client using raw fetch
  */
 export class CloudflareApi {
-  public readonly accountId: string;
   public readonly baseUrl: string;
-  public readonly apiKey: Secret | undefined;
-  public readonly apiToken: Secret | undefined;
-  public readonly email: string | undefined;
-  public readonly authOptions: CloudflareAuthOptions;
+  public readonly accountId: string;
+  public readonly credentials: Credentials;
+  public readonly profile: string | undefined;
 
   /**
    * Create a new Cloudflare API client
@@ -107,30 +149,16 @@ export class CloudflareApi {
    *
    * @param options API options
    */
-  constructor(
-    options: CloudflareApiOptions & {
-      accountId: string;
-    },
-  ) {
-    this.accountId = options.accountId;
+  constructor(options: {
+    baseUrl?: string;
+    accountId: string;
+    credentials: Credentials;
+    profile?: string;
+  }) {
     this.baseUrl = options.baseUrl ?? "https://api.cloudflare.com/client/v4";
-    this.apiKey = options.apiKey;
-    this.apiToken = options.apiToken;
-    this.email = options.email;
-
-    if (this.apiKey && this.apiToken) {
-      throw new Error("'apiKey' and 'apiToken' cannot both be provided");
-    } else if (this.apiKey && !this.email) {
-      throw new Error("'email' must be provided if 'apiKey' is provided");
-    }
-    this.authOptions = this.apiKey
-      ? {
-          apiKey: this.apiKey,
-          email: this.email!,
-        }
-      : {
-          apiToken: this.apiToken,
-        };
+    this.accountId = options.accountId;
+    this.credentials = options.credentials;
+    this.profile = options.profile;
   }
 
   /**
@@ -140,7 +168,7 @@ export class CloudflareApi {
    * @param init Fetch init options
    * @returns Raw Response object from fetch
    */
-  async fetch(path: string, init: RequestInit = {}): Promise<Response> {
+  public async fetch(path: string, init: RequestInit = {}): Promise<Response> {
     let headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -156,7 +184,10 @@ export class CloudflareApi {
       headers = init.headers;
     }
     headers = {
-      ...(await getCloudflareAuthHeaders(this.authOptions)),
+      ...(await CloudflareAuth.formatHeadersWithRefresh({
+        profile: this.profile,
+        credentials: this.credentials,
+      })),
       ...headers,
     };
 
@@ -165,21 +196,39 @@ export class CloudflareApi {
       delete headers["Content-Type"];
     }
 
+    let forbidden = false;
+
     // Use withExponentialBackoff for automatic retry on network errors
     return withExponentialBackoff(
       async () => {
-        const response = await fetch(`${this.baseUrl}${path}`, {
+        const response = await safeFetch(`${this.baseUrl}${path}`, {
           ...init,
           headers,
         });
         if (response.status.toString().startsWith("5")) {
-          throw new InternalError("5xx error");
+          throw new InternalError(response.statusText);
+        }
+        if (response.status === 403 && !forbidden) {
+          // we occasionally get 403s from Cloudflare tha tare actually transient
+          // so, we will retry this at MOST once
+          forbidden = true;
+          throw new ForbiddenError();
+        }
+        if (response.status === 429) {
+          const data: any = await response.json();
+          throw new TooManyRequestsError(
+            data.errors[0].message ?? response.statusText,
+          );
         }
         return response;
       },
       // transient errors should be retried aggressively
-      (error) => error instanceof InternalError,
-      5, // Maximum 5 attempts (1 initial + 4 retries)
+      (error) =>
+        error instanceof InternalError ||
+        error instanceof TooManyRequestsError ||
+        error instanceof ForbiddenError ||
+        error.code === "ECONNRESET",
+      10, // Maximum 10 attempts (1 initial + 9 retries)
       1000, // Start with 1s delay, will exponentially increase
     );
   }
@@ -205,13 +254,11 @@ export class CloudflareApi {
     body: any,
     init: RequestInit = {},
   ): Promise<Response> {
-    const requestBody =
-      body instanceof FormData
-        ? body
-        : typeof body === "string"
-          ? body
-          : JSON.stringify(body);
-    return this.fetch(path, { ...init, method: "POST", body: requestBody });
+    return this.fetch(path, {
+      ...init,
+      method: "POST",
+      body: this.toBody(body),
+    });
   }
 
   /**
@@ -222,8 +269,21 @@ export class CloudflareApi {
     body: any,
     init: RequestInit = {},
   ): Promise<Response> {
-    const requestBody = body instanceof FormData ? body : JSON.stringify(body);
-    return this.fetch(path, { ...init, method: "PUT", body: requestBody });
+    return this.fetch(path, {
+      ...init,
+      method: "PUT",
+      body: this.toBody(body),
+    });
+  }
+
+  toBody(body: BodyInit): BodyInit {
+    return body instanceof FormData
+      ? body
+      : typeof body === "string"
+        ? body
+        : body instanceof ReadableStream
+          ? body
+          : JSON.stringify(body);
   }
 
   /**
@@ -237,7 +297,7 @@ export class CloudflareApi {
     return this.fetch(path, {
       ...init,
       method: "PATCH",
-      body: JSON.stringify(body),
+      body: this.toBody(body),
     });
   }
 
@@ -250,3 +310,32 @@ export class CloudflareApi {
 }
 
 class InternalError extends Error {}
+
+class TooManyRequestsError extends Error {
+  constructor(message: string) {
+    super(
+      `Cloudflare Rate Limit Exceeded at ${new Date().toISOString()}: ${message}`,
+    );
+  }
+}
+
+class ForbiddenError extends Error {}
+/**
+ * Cloudflare scope extensions - adds Cloudflare credential support to scope options.
+ * This uses TypeScript module augmentation to extend the ProviderCredentials interface.
+ * Since ScopeOptions and RunOptions both extend ProviderCredentials,
+ * they automatically inherit these properties.
+ *
+ * NOTE: These scope credentials are not currently being used by createCloudflareApi.
+ * See TODO above in createCloudflareApi function for implementation needed.
+ */
+declare module "../scope.ts" {
+  interface ProviderCredentials {
+    /**
+     * Cloudflare credentials configuration for this scope.
+     * All Cloudflare resources created within this scope will inherit these credentials
+     * unless overridden at the resource level.
+     */
+    cloudflare?: CloudflareApiOptions;
+  }
+}

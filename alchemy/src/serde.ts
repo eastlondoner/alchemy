@@ -1,6 +1,6 @@
-import { decryptWithKey, encrypt } from "./encrypt.js";
-import { Scope } from "./scope.js";
-import { Secret } from "./secret.js";
+import { decryptWithKey, encrypt } from "./encrypt.ts";
+import { isScope, type Scope } from "./scope.ts";
+import { isSecret, Secret } from "./secret.ts";
 
 import type { Type } from "arktype";
 
@@ -13,23 +13,84 @@ function isType(value: any): value is Type<any, any> {
   );
 }
 
+export type Serialized<T> = T extends
+  | undefined
+  | null
+  | boolean
+  | number
+  | string
+  | bigint
+  ? T
+  : T extends Type<any, any>
+    ? {
+        "@schema": string;
+      }
+    : T extends Secret<string>
+      ? {
+          "@secret": string;
+        }
+      : T extends Secret<any>
+        ? {
+            "@secret": {
+              object: string;
+            };
+          }
+        : T extends Date
+          ? {
+              "@date": string;
+            }
+          : T extends Symbol
+            ? {
+                "@symbol": string;
+              }
+            : T extends Scope
+              ? {
+                  "@scope": null;
+                }
+              : T extends Function
+                ? undefined
+                : T extends Array<infer U>
+                  ? Array<Serialized<U>>
+                  : T extends object
+                    ? {
+                        [K in keyof T as K extends symbol
+                          ? string
+                          : K]: Serialized<T[K]>;
+                      }
+                    : T;
+
 export async function serialize(
   scope: Scope,
   value: any,
   options?: {
     encrypt?: boolean;
+    transform?: (value: any) => any;
   },
 ): Promise<any> {
+  if (options?.transform) {
+    value = options.transform(value);
+  }
+
   if (Array.isArray(value)) {
     return Promise.all(value.map((value) => serialize(scope, value, options)));
-  } else if (value instanceof Secret) {
+  } else if (isSecret(value)) {
     if (!scope.password) {
-      throw new Error("Cannot serialize secret without password");
+      throw new Error(
+        "Cannot serialize secret without password, did you forget to set password when initializing your alchemy app?\n" +
+          "See: https://alchemy.run/concepts/secret/#encryption-password",
+      );
     }
     return {
       "@secret":
         options?.encrypt !== false
-          ? await encrypt(value.unencrypted, scope.password)
+          ? typeof value.unencrypted === "string"
+            ? await encrypt(value.unencrypted, scope.password)
+            : {
+                data: await encrypt(
+                  JSON.stringify(value.unencrypted),
+                  scope.password,
+                ),
+              }
           : value.unencrypted,
     };
   } else if (isType(value)) {
@@ -45,20 +106,22 @@ export async function serialize(
     return {
       "@symbol": value.toString(),
     };
-  } else if (value instanceof Scope) {
+  } else if (isScope(value)) {
     return {
       "@scope": null,
     };
+  } else if (isImportMeta(value)) {
+    // ImportMeta serialized as {}, so we are mapping it
+    // TODO(sam):
+    return Object.fromEntries(
+      Object.keys(Object.getPrototypeOf(value))
+        // exlcude import.meta.env
+        .filter((prop) => prop === "env")
+        .map((prop) => [prop, (value as any)[prop]]),
+    );
   } else if (value && typeof value === "object") {
     for (const symbol of Object.getOwnPropertySymbols(value)) {
       assertNotUniqueSymbol(symbol);
-    }
-    for (const key of Object.keys(value)) {
-      if (parseSymbol(key)) {
-        throw new Error(
-          `Cannot serialize property '${key}' because it looks like a stringified symbol.`,
-        );
-      }
     }
     return Object.fromEntries(
       await Promise.all(
@@ -77,16 +140,51 @@ export async function serialize(
   return value;
 }
 
-export async function deserialize(scope: Scope, value: any): Promise<any> {
+function isImportMeta(value: any): value is ImportMeta {
+  return (
+    value &&
+    typeof value === "object" &&
+    typeof value.dirname === "string" &&
+    typeof value.filename === "string" &&
+    typeof value.url === "string"
+  );
+}
+
+export async function deserialize(
+  scope: Scope,
+  value: any,
+  options?: {
+    transform?: (value: any) =>
+      | undefined
+      | {
+          value: any;
+        };
+  },
+): Promise<any> {
+  const replacement = options?.transform?.(value);
+  if (replacement) {
+    return replacement.value;
+  }
+
   if (Array.isArray(value)) {
     return await Promise.all(
-      value.map(async (item) => await deserialize(scope, item)),
+      value.map(async (item) => await deserialize(scope, item, options)),
     );
   }
   if (value && typeof value === "object") {
-    if (typeof value["@secret"] === "string") {
+    if (value["@secret"]) {
       if (!scope.password) {
-        throw new Error("Cannot deserialize secret without password");
+        throw new Error(
+          "Cannot deserialize secret without password, did you forget to set password when initializing your alchemy app?\n" +
+            "See: https://alchemy.run/concepts/secret/#encryption-password",
+        );
+      }
+      if (typeof value["@secret"] === "object") {
+        return new Secret(
+          JSON.parse(
+            await decryptWithKey(value["@secret"].data, scope.password),
+          ),
+        );
       }
       return new Secret(await decryptWithKey(value["@secret"], scope.password));
     } else if ("@schema" in value) {
@@ -103,7 +201,7 @@ export async function deserialize(scope: Scope, value: any): Promise<any> {
       await Promise.all(
         Object.entries(value).map(async ([key, value]) => [
           parseSymbol(key) ?? key,
-          await deserialize(scope, value),
+          await deserialize(scope, value, options),
         ]),
       ),
     );

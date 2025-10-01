@@ -1,32 +1,66 @@
-import * as crypto from "node:crypto";
-import * as fs from "node:fs/promises";
-import type { Context } from "../context.js";
-import type { BundleProps } from "../esbuild/bundle.js";
-import { Resource } from "../resource.js";
-import { getContentType } from "../util/content-type.js";
-import { withExponentialBackoff } from "../util/retry.js";
-import { slugify } from "../util/slugify.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
+import path from "pathe";
+import type { Context } from "../context.ts";
+import type { BundleProps } from "../esbuild/bundle.ts";
+import { Resource, ResourceKind } from "../resource.ts";
+import type { type } from "../type.ts";
+import { DeferredPromise } from "../util/deferred-promise.ts";
+import { logger } from "../util/logger.ts";
+import { withExponentialBackoff } from "../util/retry.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
 import {
   type CloudflareApi,
   type CloudflareApiOptions,
   createCloudflareApi,
-} from "./api.js";
-import type { Assets } from "./assets.js";
-import { type Bindings, Self, type WorkerBindingSpec } from "./bindings.js";
-import type { Bound } from "./bound.js";
-import { bundleWorkerScript } from "./bundle/bundle-worker.js";
-import type { DurableObjectNamespace } from "./durable-object-namespace.js";
-import { type EventSource, isQueueEventSource } from "./event-source.js";
+} from "./api.ts";
+import type { Assets } from "./assets.ts";
+import type {
+  Bindings,
+  Self,
+  WorkerBindingDurableObjectNamespace,
+  WorkerBindingSpec,
+} from "./bindings.ts";
+import type { Bound } from "./bound.ts";
+import { DEFAULT_COMPATIBILITY_DATE } from "./compatibility-date.gen.ts";
+import {
+  type CompatibilityPreset,
+  unionCompatibilityFlags,
+} from "./compatibility-presets.ts";
+import { type Container, ContainerApplication } from "./container.ts";
+import { CustomDomain } from "./custom-domain.ts";
+import type { DispatchNamespace } from "./dispatch-namespace.ts";
+import {
+  DurableObjectNamespace,
+  isDurableObjectNamespace,
+} from "./durable-object-namespace.ts";
+import { type EventSource, isQueueEventSource } from "./event-source.ts";
+import { deleteMiniflareWorkerData } from "./miniflare/delete.ts";
 import {
   QueueConsumer,
   deleteQueueConsumer,
-  listQueueConsumers,
-} from "./queue-consumer.js";
-import { isQueue } from "./queue.js";
-import type { WorkerScriptMetadata } from "./worker-metadata.js";
-import type { SingleStepMigration } from "./worker-migration.js";
-import { type Workflow, upsertWorkflow } from "./workflow.js";
+  listQueueConsumersForWorker,
+} from "./queue-consumer.ts";
+import { isQueue } from "./queue.ts";
+import { Route } from "./route.ts";
+import { type AssetUploadResult, uploadAssets } from "./worker-assets.ts";
+import {
+  WorkerBundle,
+  type WorkerBundleSource,
+  normalizeWorkerBundle,
+} from "./worker-bundle.ts";
+import {
+  type WorkerScriptMetadata,
+  bumpMigrationTagVersion,
+  prepareWorkerMetadata,
+} from "./worker-metadata.ts";
+import { WorkerSubdomain, disableWorkerSubdomain } from "./worker-subdomain.ts";
+import { createTail } from "./worker-tail.ts";
+import { Workflow, isWorkflow, upsertWorkflow } from "./workflow.ts";
+
+// Previous versions of `Worker` used the `Bundle` resource.
+// This import is here to avoid errors when destroying the `Bundle` resource.
+import "../esbuild/bundle.ts";
+import { Scope } from "../scope.ts";
+import type { WorkerRef } from "./worker-ref.ts";
 
 /**
  * Configuration options for static assets
@@ -44,7 +78,8 @@ export interface AssetsConfig {
 
   /**
    * Determines the redirects and rewrites of requests for HTML content
-   * @default "auto-trailing-slash"
+   *
+   * @default auto-trailing-slash
    */
   html_handling?:
     | "auto-trailing-slash"
@@ -54,57 +89,42 @@ export interface AssetsConfig {
 
   /**
    * Determines the response when a request does not match a static asset, and there is no Worker script
+   *
+   * @default none
    */
   not_found_handling?: "none" | "404-page" | "single-page-application";
 
   /**
    * When true, requests will always invoke the Worker script.
+   * If an array is passed, the worker will be invoked for matching requests.
    * Otherwise, attempt to serve an asset matching the request, falling back to the Worker script.
+   *
+   * @default false
    */
-  run_worker_first?: boolean;
-
-  /**
-   * When true and the incoming request matches an asset, that will be served instead of invoking the Worker script.
-   * When false, requests will always invoke the Worker script.
-   * @default true
-   * @deprecated
-   */
-  serve_directly?: boolean;
+  run_worker_first?: boolean | string[];
 }
 
-/**
- * Properties for creating or updating a Worker
- */
-export interface WorkerProps<B extends Bindings = Bindings>
-  extends CloudflareApiOptions {
-  /**
-   * The worker script content (JavaScript or WASM)
-   * One of script, entryPoint, or bundle must be provided
-   */
-  script?: string;
-
-  /**
-   * Path to the entry point file
-   *
-   * Will be bundled using esbuild
-   *
-   * One of script, entryPoint, or bundle must be provided
-   */
-  entrypoint?: string;
-
-  /**
-   * The project root directory used to resolve aliases.
-   *
-   * @default process.cwd()
-   */
-  projectRoot?: string;
-
+export interface BaseWorkerProps<
+  B extends Bindings | undefined = undefined,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> extends CloudflareApiOptions {
   /**
    * Bundle options when using entryPoint
    *
    * Ignored if bundle is provided
    */
   bundle?: Omit<BundleProps, "entryPoint">;
+
+  /**
+   * The root directory of the project
+   */
+  cwd?: string;
+
+  /**
+   * The root directory of the project
+   * @deprecated Use `cwd` instead
+   */
+  projectRoot?: string;
 
   /**
    * Module format for the worker script
@@ -117,7 +137,7 @@ export interface WorkerProps<B extends Bindings = Bindings>
   /**
    * Name for the worker
    *
-   * @default id
+   * @default ${app}-${stage}-${id}
    */
   name?: string;
 
@@ -130,6 +150,8 @@ export interface WorkerProps<B extends Bindings = Bindings>
    * Environment variables to attach to the worker
    *
    * These will be converted to plain_text bindings
+   *
+   * @deprecated - use `bindings` instead
    */
   env?: {
     [key: string]: string;
@@ -158,18 +180,13 @@ export interface WorkerProps<B extends Bindings = Bindings>
   };
 
   /**
-   * Migrations to apply to the worker
-   */
-  migrations?: SingleStepMigration;
-
-  /**
    * Whether to adopt the Worker if it already exists when creating
    */
   adopt?: boolean;
 
   /**
    * The compatibility date for the worker
-   * @default "2025-04-26"
+   * @default DEFAULT_WORKER_COMPATIBILITY_DATE - automatically pinned to the latest Workers release
    */
   compatibilityDate?: string;
 
@@ -177,6 +194,15 @@ export interface WorkerProps<B extends Bindings = Bindings>
    * The compatibility flags for the worker
    */
   compatibilityFlags?: string[];
+
+  /**
+   * Compatibility preset to automatically include common compatibility flags
+   *
+   * - "node": Includes nodejs_compat flag for Node.js compatibility
+   *
+   * @default undefined (no preset)
+   */
+  compatibility?: CompatibilityPreset;
 
   /**
    * Configuration for static assets
@@ -200,14 +226,226 @@ export interface WorkerProps<B extends Bindings = Bindings>
    * Can include queues, streams, or other event sources.
    */
   eventSources?: EventSource[];
+
+  /**
+   * Routes to create for this worker.
+   *
+   * Each route maps a URL pattern to this worker script.
+   *
+   * @example
+   * await Worker("my-worker", {
+   *   routes: [
+   *     "sub.example.com/*",
+   *     { pattern: "sub.example.com/*", zoneId: "1234567890" },
+   *   ],
+   * });
+   */
+  routes?: (
+    | string
+    | {
+        /**
+         * URL pattern for the route
+         * @example "sub.example.com/*"
+         */
+        pattern: string;
+        /**
+         * Zone ID for the route. If not provided, will be automatically inferred from the route pattern.
+         */
+        zoneId?: string;
+        /**
+         * Whether to adopt an existing route with the same pattern if it exists
+         * @default false
+         */
+        adopt?: boolean;
+      }
+  )[];
+
+  /**
+   * Custom domains to bind to the worker
+   *
+   * @example
+   * await Worker("my-worker", {
+   *   domains: [
+   *     "example.com",
+   *     { name: "example.com", zoneId: "1234567890" },
+   *   ],
+   * });
+   */
+  domains?: (
+    | string
+    | {
+        /**
+         * The domain name to bind to the worker
+         */
+        domainName: string;
+        /**
+         * Zone ID for the domain.
+         *
+         * @default - If not provided, will be automatically inferred from the domain name.
+         */
+        zoneId?: string;
+        /**
+         * Whether to adopt an existing domain if it exists
+         * @default false
+         */
+        adopt?: boolean;
+      }
+  )[];
+
+  /**
+   * The RPC class to use for the worker.
+   *
+   * This is only used when using the rpc property.
+   */
+  rpc?: (new (...args: any[]) => RPC) | type<RPC>;
+
+  /**
+   * Deploy this worker to a dispatch namespace
+   *
+   * This allows workers to be routed to via dispatch namespace routing rules
+   */
+  namespace?: string | DispatchNamespace;
+
+  /**
+   * Version label for this worker deployment
+   *
+   * When specified, the worker will be published as a version with this label
+   * instead of updating the live deployment. This creates a preview URL that
+   * can be tested before promoting to production.
+   *
+   * @example "pr-123"
+   */
+  version?: string;
+
+  /**
+   * Configuration for local development. By default, when Alchemy is running in development mode,
+   * the worker will be emulated locally and available at a randomly selected port.
+   */
+  dev?:
+    | {
+        /**
+         * Port to use for local development
+         */
+        port?: number;
+        /**
+         * Whether to run the worker remotely instead of locally.
+         *
+         * @default false
+         */
+        remote?: boolean;
+        /**
+         * Whether to expose the worker via a Cloudflare Tunnel.
+         *
+         * @default false
+         */
+        tunnel?: boolean;
+        url?: undefined;
+      }
+    | {
+        url: string;
+        remote?: undefined;
+        tunnel?: undefined;
+        port?: undefined;
+      };
+
+  /**
+   * Smart placement configuration for the worker.
+   *
+   * Controls how Cloudflare places the worker across its network for optimal performance.
+   *
+   * When omitted, smart placement is disabled (default behavior).
+   */
+  placement?: {
+    /**
+     * The placement mode for the worker.
+     *
+     * - "smart": Automatically optimize placement based on performance metrics
+     *
+     * @default undefined (smart placement disabled)
+     */
+    mode: "smart";
+  };
+
+  limits?: {
+    /**
+     * The maximum CPU time in milliseconds that the worker can use.
+     *
+     * @see https://developers.cloudflare.com/workers/platform/limits/#cpu-time
+     * @default 30_000 (30 seconds)
+     */
+    cpu_ms?: number;
+  };
+}
+
+export interface InlineWorkerProps<
+  B extends Bindings | undefined = Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> extends BaseWorkerProps<B, RPC> {
+  script: string;
+  entrypoint?: undefined;
+  noBundle?: false;
+}
+
+export interface EntrypointWorkerProps<
+  B extends Bindings | undefined = Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> extends BaseWorkerProps<B, RPC> {
+  script?: undefined;
+  /**
+   * The entrypoint for the worker script.
+   */
+  entrypoint: string;
+
+  /**
+   * Whether to disable bundling of the worker script.
+   *
+   * If true, the worker script and any files it imports will be deployed in the Worker.
+   *
+   * @default false
+   */
+  noBundle?: boolean;
+
+  /**
+   * Whether to upload source maps for the worker script.
+   *
+   * @default true
+   */
+  sourceMap?: boolean;
+
+  /**
+   * Rules for adding additional files to the bundle.
+   *
+   * If {@link noBundle} is false | undefined, this will be ignored.
+   *
+   * @default - all .js, .mjs, and .wasm files under the entrypoint directory
+   */
+  rules?: {
+    globs: string[];
+  }[];
+}
+
+/**
+ * Properties for creating or updating a Worker
+ */
+export type WorkerProps<
+  B extends Bindings | undefined = Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> = InlineWorkerProps<B, RPC> | EntrypointWorkerProps<B, RPC>;
+
+export function isWorker(resource: any): resource is Worker<any> {
+  return resource?.[ResourceKind] === "cloudflare::Worker";
 }
 
 /**
  * Output returned after Worker creation/update
  */
-export interface Worker<B extends Bindings = Bindings>
-  extends Resource<"cloudflare::Worker">,
-    Omit<WorkerProps<B>, "url" | "script"> {
+export type Worker<
+  B extends Bindings | undefined = Bindings | undefined,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> = Omit<WorkerProps<B>, "url" | "script" | "routes" | "domains"> & {
+  /** @internal phantom property */
+  __rpc__?: RPC;
+
   type: "service";
 
   /**
@@ -219,6 +457,12 @@ export interface Worker<B extends Bindings = Bindings>
    * The name of the worker
    */
   name: string;
+
+  /**
+   * The root directory of the project
+   * @default process.cwd()
+   */
+  cwd: string;
 
   /**
    * Time at which the worker was created
@@ -233,23 +477,37 @@ export interface Worker<B extends Bindings = Bindings>
   /**
    * The worker's URL if enabled
    * Format: {name}.{subdomain}.workers.dev
+   *
+   * @default true
    */
   url?: string;
 
   /**
    * The bindings that were created
    */
-  bindings: B | undefined;
+  bindings: B;
 
   /**
    * Configuration for static assets
    */
   assets?: AssetsConfig;
 
+  /**
+   * The routes that were created for this worker
+   */
+  routes?: Route[];
+
+  /**
+   * The custom domains that were created for this worker
+   */
+  domains?: CustomDomain[];
+
   // phantom property (for typeof myWorker.Env)
-  Env: {
-    [bindingName in keyof B]: Bound<B[bindingName]>;
-  };
+  Env: B extends Bindings
+    ? {
+        [bindingName in keyof B]: Bound<B[bindingName]>;
+      }
+    : undefined;
 
   /**
    * The compatibility date for the worker
@@ -260,7 +518,32 @@ export interface Worker<B extends Bindings = Bindings>
    * The compatibility flags for the worker
    */
   compatibilityFlags: string[];
-}
+
+  /**
+   * The dispatch namespace this worker is deployed to
+   */
+  namespace?: string | DispatchNamespace;
+
+  /**
+   * Version label for this worker deployment
+   */
+  version?: string;
+
+  /**
+   * Smart placement configuration for the worker
+   */
+  placement?: {
+    mode: "smart";
+  };
+
+  /**
+   * Whether the worker has a remote deployment
+   * @internal
+   */
+  dev?: {
+    hasRemote: boolean;
+  };
+};
 
 /**
  * A Cloudflare Worker is a serverless function that can be deployed to the Cloudflare network.
@@ -271,7 +554,6 @@ export interface Worker<B extends Bindings = Bindings>
  * const api = await Worker("api", {
  *   name: "api-worker",
  *   entrypoint: "./src/api.ts",
- *   routes: ["api.example.com/*"],
  *   url: true
  * });
  *
@@ -284,8 +566,8 @@ export interface Worker<B extends Bindings = Bindings>
  * @example
  * // Create a real-time chat worker using Durable Objects
  * // for state management:
- * const chatRooms = new DurableObjectNamespace("chat-rooms");
- * const userStore = new DurableObjectNamespace("user-store");
+ * const chatRooms = DurableObjectNamespace("chat-rooms");
+ * const userStore = DurableObjectNamespace("user-store");
  *
  * const chat = await Worker("chat", {
  *   name: "chat-worker",
@@ -331,7 +613,7 @@ export interface Worker<B extends Bindings = Bindings>
  *
  * @example
  * // Create a worker with static assets:
- * const staticAssets = await Assets("static", {
+ * const staticAssets = await Assets({
  *   path: "./src/assets"
  * });
  *
@@ -351,10 +633,102 @@ export interface Worker<B extends Bindings = Bindings>
  *   crons: ['* 15 * * *', '0 0 * * *', '0 12 * * MON']
  * })
  *
- * @see
- * https://developers.cloudflare.com/workers/
+ * @example
+ * // Create cross-script durable object binding where one worker
+ * // defines the durable object and another worker accesses it:
+ * const dataWorker = await Worker("data-worker", {
+ *   name: "data-worker",
+ *   entrypoint: "./src/data.ts",
+ *   bindings: {
+ *     // Bind to its own durable object
+ *     STORAGE: DurableObjectNamespace("storage", {
+ *       className: "DataStorage"
+ *     })
+ *   }
+ * });
+ *
+ * const apiWorker = await Worker("api-worker", {
+ *   name: "api-worker",
+ *   entrypoint: "./src/api.ts",
+ *   bindings: {
+ *     // Cross-script binding to the data worker's durable object
+ *     SHARED_STORAGE: dataWorker.bindings.STORAGE
+ *   }
+ * });
+ *
+ * @example
+ * // Create a worker with queue event sources and custom consumer settings:
+ * const taskQueue = await Queue("task-queue", {
+ *   name: "task-queue"
+ * });
+ *
+ * const dlq = await Queue("failed-tasks", {
+ *   name: "failed-tasks"
+ * });
+ *
+ * const queueWorker = await Worker("queue-processor", {
+ *   name: "queue-processor",
+ *   entrypoint: "./src/processor.ts",
+ *   bindings: {
+ *     TASK_QUEUE: taskQueue  // Producer: bind queue for sending messages
+ *   },
+ *   eventSources: [{  // Consumer: configure processing settings
+ *     queue: taskQueue,
+ *     settings: {
+ *       batchSize: 15,           // Process 15 messages at once
+ *       maxConcurrency: 3,       // Allow 3 concurrent invocations
+ *       maxRetries: 5,           // Retry failed messages up to 5 times
+ *       maxWaitTimeMs: 2500,     // Wait up to 2.5 seconds to fill a batch
+ *       retryDelay: 60,          // Wait 60 seconds before retrying failed messages
+ *       deadLetterQueue: dlq     // Send failed messages to dead letter queue
+ *     }
+ *   }]
+ * });
+ *
+ * @example
+ * // Create a worker version for testing with a preview URL:
+ * const previewWorker = await Worker("my-worker", {
+ *   name: "my-worker",
+ *   entrypoint: "./src/worker.ts",
+ *   version: "pr-123"
+ * });
+ *
+ * // The worker will have a preview URL for testing:
+ * console.log(`Preview URL: ${previewWorker.url}`);
+ * // Output: Preview URL: https://pr-123-my-worker.subdomain.workers.dev
  */
-export const Worker = Resource(
+export function Worker<
+  const B extends Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded,
+>(id: string, props: WorkerProps<B, RPC>): Promise<Worker<B, RPC>>;
+
+export function Worker<const B extends Bindings>(
+  id: string,
+  props: WorkerProps<B>,
+): Promise<Worker<B>> {
+  return _Worker(id, props as WorkerProps<B>);
+}
+
+Worker.experimentalEntrypoint = <RPC extends Rpc.WorkerEntrypointBranded>(
+  worker: Worker | WorkerRef | Self,
+  entrypoint: string,
+) => {
+  if (Scope.getScope()?.local) {
+    logger.warn(
+      "Worker.experimentalEntrypoint is not supported in local development. See: https://github.com/cloudflare/workers-sdk/issues/10681",
+    );
+  }
+  return {
+    ...worker,
+    // we rename the entrypoint in order to prevent collisions with entrypoint on Worker
+    __entrypoint__: entrypoint,
+  } as (Worker | WorkerRef) & {
+    __entrypoint__?: string;
+    __rpc__?: RPC;
+  };
+};
+
+const _Worker = Resource(
   "cloudflare::Worker",
   {
     alwaysUpdate: true,
@@ -363,615 +737,842 @@ export const Worker = Resource(
     this: Context<Worker<NoInfer<B>>>,
     id: string,
     props: WorkerProps<B>,
-  ): Promise<Worker<B>> {
-    // Validate input - we need either script, entryPoint, or bundle
-    if (!props.script && !props.entrypoint) {
-      throw new Error("One of script or entryPoint must be provided");
+  ) {
+    let adopt = props.adopt ?? this.scope.adopt;
+    const workerName =
+      props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+    if (this.phase === "create" && !props.adopt) {
+      // it is possible that this worker already exists and was created by the old Website wrapper with a nested scope
+      // we need to detect this and set adopt=true so that the previous version will be adopted seamlessly
+
+      // HEURISTIC: `this.scope` would previously be the nested outer scope alchemy.run
+      // so, if `this.scope` has a child of `wrangler.jsonc`, then it is likely that it was created by the old Website wrapper with a nested scope
+      if (await this.scope.has("wrangler.jsonc", "cloudflare::WranglerJson")) {
+        logger.warn(
+          `Migrating Worker '${workerName}' from the legacy Website wrapper.`,
+        );
+        props.adopt = true;
+      }
     }
 
-    // Create Cloudflare API client with automatic account discovery
-    const api = await createCloudflareApi(props);
+    const options = (() => {
+      if (props.projectRoot) {
+        logger.warn("projectRoot is deprecated, use cwd instead");
+        props.cwd = props.projectRoot;
+      }
 
-    // Use the provided name
-    const workerName = props.name ?? id;
+      const cwd = path.resolve(props.cwd ?? process.cwd());
+      const compatibilityDate =
+        props.compatibilityDate ?? DEFAULT_COMPATIBILITY_DATE;
+      const compatibilityFlags = unionCompatibilityFlags(
+        props.compatibility,
+        props.compatibilityFlags,
+      );
+      const dispatchNamespace =
+        typeof props.namespace === "string"
+          ? props.namespace
+          : props.namespace?.namespaceName;
+      const bundle = normalizeWorkerBundle({
+        id,
+        entrypoint: props.entrypoint,
+        script: props.script,
+        format: props.format,
+        noBundle: props.noBundle,
+        rules: "rules" in props ? props.rules : undefined,
+        bundle: props.bundle,
+        cwd,
+        compatibilityDate,
+        compatibilityFlags,
+        outdir:
+          props.bundle?.outdir ??
+          // the out folder can't be moved to the root of a monorepo, it must be ${cwd} or else miniflare throws a fit
+          path.join(process.cwd(), ".alchemy", "out", workerName),
+        sourceMap: "sourceMap" in props ? props.sourceMap : undefined,
+      });
 
-    const oldBindings = await this.get<Bindings>("bindings");
+      let assets: Assets | undefined;
+      const containers: Container[] = [];
+      const workflows: Workflow[] = [];
+      const durableObjects: DurableObjectNamespace[] = [];
+      for (const binding of Object.values(props.bindings ?? {})) {
+        if (typeof binding !== "object") continue;
 
-    const compatibilityDate = props.compatibilityDate ?? "2025-04-20";
-    const compatibilityFlags = props.compatibilityFlags ?? [];
-
-    const uploadWorkerScript = async (props: WorkerProps<B>) => {
-      // Get the script content - either from props.script, or by bundling
-      const scriptContent =
-        props.script ??
-        (await bundleWorkerScript({
-          ...props,
-          compatibilityDate,
-          compatibilityFlags,
-        }));
-
-      // Find any assets bindings
-      const assetsBindings: { name: string; assets: Assets }[] = [];
-      const workflowsBindings: Workflow[] = [];
-
-      if (props.bindings) {
-        for (const [bindingName, binding] of Object.entries(props.bindings)) {
-          if (typeof binding === "object") {
-            if (binding.type === "assets") {
-              assetsBindings.push({ name: bindingName, assets: binding });
-            } else if (binding.type === "workflow") {
-              workflowsBindings.push(binding);
-            }
-          }
+        if (binding.type === "assets") {
+          assets = binding;
+        } else if (binding.type === "container") {
+          containers.push(binding);
+        } else if (
+          binding.type === "workflow" &&
+          (!binding.scriptName || binding.scriptName === workerName)
+        ) {
+          workflows.push(binding);
+        } else if (
+          binding.type === "durable_object_namespace" &&
+          (!binding.scriptName || binding.scriptName === workerName)
+        ) {
+          durableObjects.push(binding);
         }
       }
 
-      // Upload any assets and get completion tokens
-      let assetUploadResult: AssetUploadResult | undefined;
-      if (assetsBindings.length > 0) {
-        // We'll use the first asset binding for now
-        // In the future, we might want to support multiple asset bindings
-        const assetBinding = assetsBindings[0];
-
-        // Upload the assets and get the completion token
-        assetUploadResult = await uploadAssets(
-          api,
-          workerName,
-          assetBinding.assets,
-          props.assets,
-        );
-      }
-
-      // Prepare metadata with bindings
-      const scriptMetadata = await prepareWorkerMetadata(
-        this,
-        oldBindings,
-        {
-          ...props,
-          compatibilityDate,
-          compatibilityFlags,
-          workerName,
-        },
-        assetUploadResult,
-      );
-
-      await putWorker(api, workerName, scriptContent, scriptMetadata);
-
-      for (const workflow of workflowsBindings) {
-        await upsertWorkflow(api, {
-          workflowName: workflow.workflowName,
-          className: workflow.className,
-          scriptName: workerName,
-        });
-      }
-
-      await Promise.all(
-        props.eventSources?.map((eventSource) => {
-          if (isQueue(eventSource) || isQueueEventSource(eventSource)) {
-            const queue = isQueue(eventSource)
-              ? eventSource
-              : eventSource.queue;
-            return QueueConsumer(`${queue.id}-consumer`, {
-              queue,
-              scriptName: workerName,
-              accountId: api.accountId,
-              settings: isQueueEventSource(eventSource)
-                ? eventSource.settings
-                : undefined,
-            });
-          }
-          throw new Error(`Unsupported event source type: ${eventSource}`);
-        }) ?? [],
-      );
-
-      // TODO: it is less than ideal that this can fail, resulting in state problem
-      await this.set("bindings", props.bindings);
-
-      // Handle worker URL if requested
-      const workerUrl = await configureURL(
-        this,
-        api,
-        workerName,
-        props.url ?? false,
-      );
-
-      // Get current timestamp
-      const now = Date.now();
-
-      // Update cron triggers
-      if (props.crons) {
-        const res = await api.put(
-          `/accounts/${api.accountId}/workers/scripts/${workerName}/schedules`,
-          props.crons.map((cron) => ({ cron })),
-        );
-
-        if (!res.ok) {
-          await handleApiError(
-            res,
-            "updating cron triggers",
-            "worker",
-            workerName,
-          );
-        }
-      }
-
-      return { scriptMetadata, workerUrl, now };
-    };
+      return {
+        name: workerName,
+        cwd,
+        compatibilityDate,
+        compatibilityFlags,
+        dispatchNamespace,
+        bundle,
+        assets,
+        containers,
+        workflows,
+        durableObjects,
+      };
+    })();
 
     if (this.phase === "delete") {
-      if (
-        Object.values(props.bindings ?? {}).some((binding) => binding === Self)
-      ) {
-        // remove the Self bindings or else we can't remove (LOL)
-        await uploadWorkerScript({
-          ...props,
-          bindings: Object.fromEntries(
-            Object.entries(props.bindings ?? {}).filter(
-              ([_, binding]) => binding !== Self,
-            ),
-          ) as B,
+      // Heuristic: we must detect the case where this is the Worker wrapped in the old Website nested scope and not delete it
+      // we must not delete it because what we're actually doing is migrating to a flat worker
+      // we will achieve this by checking for a sibling resource with ID wrangler.jsonc and type cloudflare::WranglerJson
+      if (await this.scope.has("wrangler.jsonc", "cloudflare::WranglerJson")) {
+        // skip deletion
+        logger.warn(
+          `Migrating Worker '${options.name}' from the legacy Website wrapper.`,
+        );
+        return this.destroy(true);
+      }
+
+      if (options.bundle.isOk()) {
+        await options.bundle.value.delete?.();
+      }
+      await deleteMiniflareWorkerData(this.scope, options.name, {
+        durableObjects: options.durableObjects,
+        workflows: options.workflows,
+      });
+      if (!props.version && this.output?.dev?.hasRemote !== false) {
+        const api = await createCloudflareApi(props);
+        await deleteQueueConsumers(api, options.name);
+        await deleteWorker(api, {
+          scriptName: options.name,
+          dispatchNamespace: options.dispatchNamespace,
         });
       }
-
-      await withExponentialBackoff(
-        () =>
-          deleteWorker(this, api, {
-            ...props,
-            workerName,
-          }),
-        (err) =>
-          (err.status === 400 &&
-            err.message.includes(
-              "is still referenced by service bindings in Workers",
-            )) ||
-          err.status === 500 ||
-          err.status === 503,
-        10,
-        100,
-      );
-
       return this.destroy();
     }
-    if (this.phase === "create") {
-      if (!props.adopt) {
-        await assertWorkerDoesNotExist(this, api, workerName);
+
+    if (options.bundle.isErr()) {
+      throw new Error(options.bundle.error);
+    }
+    const bundle = options.bundle.value;
+    const api = await createCloudflareApi(props);
+
+    if (this.scope.local && !props.dev?.remote) {
+      let url: string | undefined;
+      if (props.dev?.url) {
+        url = props.dev.url;
+      } else {
+        const { MiniflareController } = await import(
+          "./miniflare/miniflare-controller.js"
+        );
+        const controller = MiniflareController.singleton;
+        url = await controller.add({
+          api,
+          id,
+          name: options.name,
+          compatibilityDate: options.compatibilityDate,
+          compatibilityFlags: options.compatibilityFlags,
+          bindings: props.bindings,
+          eventSources: props.eventSources,
+          assets: props.assets,
+          bundle,
+          port: props.dev?.port,
+          tunnel: props.dev?.tunnel ?? this.scope.tunnel,
+        });
+        this.onCleanup(() => controller.dispose());
+      }
+      await provisionResources(
+        {
+          ...props,
+          adopt,
+        },
+        {
+          name: options.name,
+          local: true,
+          dispatchNamespace: options.dispatchNamespace,
+          containers: options.containers,
+        },
+      );
+      return {
+        ...props,
+        type: "service",
+        id,
+        name: options.name,
+        cwd: path.relative(process.cwd(), options.cwd),
+        compatibilityDate: options.compatibilityDate,
+        compatibilityFlags: options.compatibilityFlags,
+        format: props.format || "esm",
+        bindings: normalizeExportBindings(options.name, props.bindings),
+        createdAt: this.output?.createdAt ?? Date.now(),
+        updatedAt: Date.now(),
+        url,
+        routes: [],
+        domains: [],
+        dev: {
+          hasRemote: this.output?.dev?.hasRemote ?? false,
+        },
+        Env: undefined!,
+      } as unknown as Worker<B>;
+    }
+
+    if (this.phase === "create" || this.output.dev?.hasRemote === false) {
+      if (props.version) {
+        // When version is specified, we adopt existing workers or create them if they don't exist
+        if (!(await workerExists(api, options))) {
+          // Create the base worker first if it doesn't exist
+          await putWorker(api, {
+            ...props,
+            version: undefined,
+            workerName: options.name,
+            scriptBundle: await bundle.create(),
+            dispatchNamespace: options.dispatchNamespace,
+            compatibilityDate: options.compatibilityDate,
+            compatibilityFlags: options.compatibilityFlags,
+            assetUploadResult: options.assets
+              ? await uploadAssets(api, {
+                  workerName: options.name,
+                  assets: options.assets,
+                  assetConfig: props.assets,
+                  namespace: options.dispatchNamespace,
+                })
+              : undefined,
+          });
+        }
+        // We always "adopt" when publishing versions
+      } else if (!adopt) {
+        await assertWorkerDoesNotExist(api, options.name);
+      } else if (adopt && !options.dispatchNamespace && props.url === false) {
+        // explicitly disable the workers.dev subdomain
+        await disableWorkerSubdomain(api, options.name);
+      }
+    } else if (this.phase === "update") {
+      const oldName = this.output.name ?? this.output.id;
+      const newName = options.name;
+
+      if (oldName && oldName !== newName) {
+        if (options.dispatchNamespace) {
+          this.replace(true);
+        } else {
+          const renameResponse = await api.patch(
+            `/accounts/${api.accountId}/workers/services/${oldName}`,
+            { id: newName },
+          );
+
+          if (!renameResponse.ok) {
+            await handleApiError(renameResponse, "rename", "worker", oldName);
+          }
+        }
       }
     }
 
-    const { scriptMetadata, workerUrl, now } = await uploadWorkerScript(props);
+    const assets = options.assets
+      ? await uploadAssets(api, {
+          workerName: options.name,
+          assets: options.assets,
+          assetConfig: props.assets,
+          namespace: options.dispatchNamespace,
+        })
+      : undefined;
+    let result: PutWorkerResult;
 
-    // Construct the output
-    return this({
+    if (this.scope.watch) {
+      const controller = new AbortController();
+      result = await watchWorker(api, props, {
+        id,
+        name: options.name,
+        dispatchNamespace: options.dispatchNamespace,
+        bundle,
+        compatibilityDate: options.compatibilityDate,
+        compatibilityFlags: options.compatibilityFlags,
+        version: props.version,
+        assets,
+        controller,
+      });
+      this.onCleanup(() => controller.abort());
+      const tail = await createTail(api, id, options.name).catch((error) => {
+        logger.error(`Failed to create tail for ${options.name}`, error);
+      });
+      this.onCleanup(() => tail?.close());
+    } else {
+      result = await putWorker(api, {
+        ...props,
+        workerName: options.name,
+        scriptBundle: await bundle.create(),
+        dispatchNamespace: options.dispatchNamespace,
+        compatibilityDate: options.compatibilityDate,
+        compatibilityFlags: options.compatibilityFlags,
+        assetUploadResult: assets,
+      });
+    }
+
+    if (props.crons) {
+      await api.put(
+        `/accounts/${api.accountId}/workers/scripts/${options.name}/schedules`,
+        props.crons?.map((cron) => ({ cron })) ?? [],
+      );
+    }
+    await Promise.all(
+      options.workflows.map((workflow) =>
+        upsertWorkflow(api, {
+          workflowName: workflow.workflowName,
+          className: workflow.className,
+          scriptName: workflow.scriptName ?? options.name,
+        }),
+      ),
+    );
+
+    const { domains, routes, subdomain } = await provisionResources(
+      {
+        ...props,
+        adopt,
+      },
+      {
+        name: options.name,
+        local: false,
+        dispatchNamespace: options.dispatchNamespace,
+        containers: options.containers,
+        result,
+        api,
+      },
+    );
+
+    const now = new Date();
+    return {
       ...props,
       type: "service",
       id,
       entrypoint: props.entrypoint,
-      name: workerName,
-      compatibilityDate,
-      compatibilityFlags,
-      format: props.format || "esm", // Include format in the output
-      bindings: props.bindings ?? ({} as B),
+      name: options.name,
+      cwd: path.relative(process.cwd(), options.cwd),
+      compatibilityDate: options.compatibilityDate,
+      compatibilityFlags: options.compatibilityFlags,
+      format: props.format || "esm",
+      bindings: normalizeExportBindings(options.name, props.bindings),
       env: props.env,
-      observability: scriptMetadata.observability,
-      createdAt: now,
+      observability: props.observability,
+      createdAt: this.output?.createdAt ?? now,
       updatedAt: now,
       eventSources: props.eventSources,
-      url: workerUrl,
-      // Include assets configuration in the output
+      url: subdomain?.url,
       assets: props.assets,
-      // Include cron triggers in the output
       crons: props.crons,
-      // phantom property
+      routes,
+      domains,
+      namespace: props.namespace,
+      version: props.version,
+      placement: props.placement,
+      limits: props.limits,
       Env: undefined!,
-    });
+      dev: {
+        hasRemote: true,
+      },
+    } as unknown as Worker<B>;
   },
 );
 
-async function deleteWorker<B extends Bindings>(
-  ctx: Context<Worker<B>>,
-  api: CloudflareApi,
-  props: WorkerProps<B> & { workerName: string },
-) {
-  const workerName = props.workerName;
-  // Delete any queue consumers attached to this worker first
-  await deleteQueueConsumers(ctx, api, workerName);
-
-  // Delete worker
-  const deleteResponse = await api.delete(
-    `/accounts/${api.accountId}/workers/scripts/${workerName}`,
+const normalizeExportBindings = (
+  scriptName: string,
+  bindings: Bindings = {},
+) => {
+  return Object.fromEntries(
+    Object.entries(bindings).map(([bindingName, binding]) => [
+      bindingName,
+      isDurableObjectNamespace(binding) && binding.scriptName === undefined
+        ? DurableObjectNamespace(binding.id, {
+            ...binding,
+            // re-export this binding mapping to the host worker (this worker)
+            scriptName,
+          })
+        : isWorkflow(binding) && binding.scriptName === undefined
+          ? Workflow(binding.id, {
+              ...binding,
+              // re-export this binding mapping to the host worker (this worker)
+              scriptName,
+            })
+          : binding,
+    ]),
   );
+};
 
-  // Check for success (2xx status code)
-  if (!deleteResponse.ok && deleteResponse.status !== 404) {
-    await handleApiError(deleteResponse, "delete", "worker", workerName);
+const assertUnique = <T, Key extends keyof T>(
+  inputs: T[],
+  key: Key,
+  message: string,
+) => {
+  const ids = inputs.map((input) => input[key]);
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+  if (duplicates.length > 0) {
+    throw new Error(`Duplicate ${message} found: ${duplicates.join(", ")}`);
+  }
+};
+
+async function provisionResources<B extends Bindings>(
+  props: WorkerProps<B> & {
+    adopt: boolean;
+  },
+  options:
+    | {
+        name: string;
+        local: true;
+        dispatchNamespace: string | undefined;
+        containers: Container[] | undefined;
+        result?: undefined;
+        api?: undefined;
+      }
+    | {
+        name: string;
+        local: false;
+        dispatchNamespace: string | undefined;
+        containers: Container[] | undefined;
+        result: PutWorkerResult;
+        api: CloudflareApi;
+      },
+) {
+  let metadataPromise: ReturnType<typeof getVersionMetadata> | undefined;
+
+  const input = {
+    containers: options.containers,
+    domains: props.domains?.map((domain) => {
+      if (typeof domain === "string") {
+        return {
+          name: domain,
+          zoneId: undefined,
+          adopt: props.adopt,
+        };
+      }
+      return {
+        name: domain.domainName,
+        zoneId: domain.zoneId,
+        adopt: domain.adopt ?? props.adopt,
+      };
+    }),
+    eventSources: props.eventSources?.map((eventSource) => {
+      if (isQueue(eventSource)) {
+        return {
+          queue: eventSource,
+          settings: eventSource.dlq
+            ? { deadLetterQueue: eventSource.dlq }
+            : undefined,
+        };
+      }
+      if (isQueueEventSource(eventSource)) {
+        return {
+          queue: eventSource.queue,
+          settings: eventSource.settings,
+        };
+      }
+      throw new Error(`Unsupported event source: ${eventSource}`);
+    }),
+    routes: props.routes?.map((route) => {
+      if (typeof route === "string") {
+        return {
+          pattern: route,
+          adopt: props.adopt,
+        };
+      }
+      return {
+        pattern: route.pattern,
+        zoneId: route.zoneId,
+        adopt: route.adopt ?? props.adopt,
+      };
+    }),
+    api: {
+      accountId: props.accountId,
+      apiKey: props.apiKey,
+      apiToken: props.apiToken,
+      email: props.email,
+      baseUrl: props.baseUrl,
+      profile: props.profile,
+    } satisfies CloudflareApiOptions,
+  };
+
+  if (input.routes) {
+    assertUnique(input.routes, "pattern", "Route");
+  }
+  if (input.domains) {
+    assertUnique(input.domains, "name", "Custom Domain");
   }
 
-  // Disable the URL if it was enabled
-  if (ctx.output?.url) {
-    try {
-      await api.post(
-        `/accounts/${api.accountId}/workers/scripts/${workerName}/subdomain`,
-        JSON.stringify({ enabled: false }),
-        {
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-    } catch (error) {
-      console.warn("Failed to disable worker URL during deletion:", error);
+  const [containers, domains, eventSources, routes, subdomain] =
+    await Promise.all([
+      input.containers
+        ? Promise.all(
+            input.containers.map(async (container) => {
+              return await ContainerApplication(container.id, {
+                image: container.image,
+                name: container.name,
+                instanceType: container.instanceType,
+                observability: container.observability,
+                durableObjects: {
+                  namespaceId: await getContainerNamespaceId(container),
+                },
+                schedulingPolicy: container.schedulingPolicy,
+                adopt: container.adopt,
+                dev: options.local,
+                ...input.api,
+              });
+            }),
+          )
+        : undefined,
+      input.domains
+        ? Promise.all(
+            input.domains.map(async (domain) => {
+              return await CustomDomain(domain.name, {
+                name: domain.name,
+                zoneId: domain.zoneId,
+                adopt: domain.adopt,
+                workerName: options.name,
+                dev: options.local,
+                ...input.api,
+              });
+            }),
+          )
+        : undefined,
+      input.eventSources
+        ? Promise.all(
+            input.eventSources.map(async (eventSource) => {
+              return await QueueConsumer(`${eventSource.queue.id}-consumer`, {
+                queue: eventSource.queue,
+                scriptName: options.name,
+                settings: eventSource.settings,
+                adopt: props.adopt,
+                dev: options.local,
+                ...input.api,
+              });
+            }),
+          )
+        : undefined,
+      input.routes
+        ? Promise.all(
+            input.routes.map(async (route) => {
+              return await Route(route.pattern, {
+                pattern: route.pattern,
+                script: options.name,
+                zoneId: route.zoneId,
+                adopt: route.adopt,
+                dev: options.local,
+                ...input.api,
+              });
+            }),
+          )
+        : undefined,
+      (props.url ?? !options.dispatchNamespace)
+        ? WorkerSubdomain("url", {
+            scriptName: options.name,
+            previewVersionId: props.version ? options.result?.id : undefined,
+            retain: !!props.version,
+            dev: options.local,
+            ...input.api,
+          })
+        : undefined,
+    ]);
+
+  return { containers, domains, routes, eventSources, subdomain };
+
+  async function getContainerNamespaceId(container: Container) {
+    if (options.local) {
+      return container.id;
     }
+    metadataPromise ??= getVersionMetadata(
+      options.api,
+      options.name,
+      options.result.deployment_id,
+    );
+    const metadata = await metadataPromise;
+    const binding = metadata.resources.bindings.find(
+      (binding): binding is WorkerBindingDurableObjectNamespace =>
+        binding.type === "durable_object_namespace" &&
+        binding.class_name === container.className,
+    );
+    if (!binding?.namespace_id) {
+      throw new Error(
+        `Container ${container.name} not found in version ${options.result.deployment_id}`,
+      );
+    }
+    return binding.namespace_id;
   }
-
-  // Return minimal output for deleted state
-  return;
 }
 
-async function putWorker(
+const watchWorker = async <B extends Bindings>(
   api: CloudflareApi,
-  workerName: string,
-  scriptContent: string,
-  scriptMetadata: WorkerMetadata,
+  props: WorkerProps<B>,
+  input: {
+    id: string;
+    name: string;
+    dispatchNamespace: string | undefined;
+    bundle: WorkerBundleSource;
+    compatibilityDate: string;
+    compatibilityFlags: string[];
+    version: string | undefined;
+    assets: AssetUploadResult | undefined;
+    controller: AbortController;
+  },
+) => {
+  const promise = new DeferredPromise<PutWorkerResult>();
+  const run = async () => {
+    for await (const bundle of input.bundle.watch(input.controller.signal)) {
+      if (promise.status === "pending") {
+        try {
+          const result = await putWorker(api, {
+            ...props,
+            workerName: input.name,
+            scriptBundle: bundle,
+            dispatchNamespace: input.dispatchNamespace,
+            compatibilityDate: input.compatibilityDate,
+            compatibilityFlags: input.compatibilityFlags,
+            assetUploadResult: input.assets,
+          });
+          promise.resolve(result);
+        } catch (error) {
+          input.controller.abort();
+          promise.reject(error);
+        }
+        continue;
+      }
+
+      logger.task("", {
+        message: "reload",
+        status: "success",
+        resource: input.id,
+        prefix: "build",
+        prefixColor: "cyanBright",
+      });
+
+      await putWorker(api, {
+        ...props,
+        workerName: input.name,
+        scriptBundle: bundle,
+        dispatchNamespace: input.dispatchNamespace,
+        version: input.version,
+        compatibilityDate: input.compatibilityDate,
+        compatibilityFlags: input.compatibilityFlags,
+        assetUploadResult: input.assets
+          ? {
+              keepAssets: true,
+              assetConfig: props.assets,
+            }
+          : undefined,
+        unstable_cacheWorkerSettings: true,
+      });
+
+      logger.task("", {
+        message: "updated",
+        status: "success",
+        resource: input.id,
+        prefix: "build",
+        prefixColor: "greenBright",
+      });
+    }
+  };
+  void run();
+  return await promise.value;
+};
+
+type PutWorkerOptions = Omit<WorkerProps, "entrypoint"> & {
+  dispatchNamespace?: string;
+  migrationTag?: string;
+  workerName: string;
+  scriptBundle: WorkerBundle;
+  version?: string;
+  compatibilityDate: string;
+  compatibilityFlags: string[];
+  assetUploadResult?: {
+    completionToken?: string;
+    keepAssets?: boolean;
+    assetConfig?: AssetsConfig;
+  };
+  tags?: string[];
+  unstable_cacheWorkerSettings?: boolean;
+};
+
+async function prepareWorkerUpload(
+  api: CloudflareApi,
+  props: PutWorkerOptions,
 ) {
+  const scriptMetadata = await prepareWorkerMetadata(api, props);
+
+  if (props.format === "cjs") {
+    scriptMetadata.body_part = props.scriptBundle.entrypoint;
+  } else {
+    scriptMetadata.main_module = props.scriptBundle.entrypoint;
+  }
+  const body = await WorkerBundle.toFormData(props.scriptBundle);
+  // Prepare metadata - add version annotations if this is a version
+  const finalMetadata = props.version
+    ? {
+        ...scriptMetadata,
+        // Exclude migrations for worker versions - they're not allowed
+        migrations: undefined,
+        annotations: {
+          "workers/tag": props.version,
+          "workers/message": `Version ${props.version}`,
+        },
+      }
+    : {
+        ...scriptMetadata,
+        migrations: scriptMetadata.migrations
+          ? {
+              ...scriptMetadata.migrations,
+              old_tag: props.migrationTag,
+              new_tag: bumpMigrationTagVersion(props.migrationTag),
+            }
+          : undefined,
+      };
+
+  body.append(
+    "metadata",
+    new Blob([JSON.stringify(finalMetadata)], {
+      type: "application/json",
+    }),
+  );
+
+  let endpoint: string;
+  let method: "PUT" | "POST";
+  if (props.version) {
+    if (props.dispatchNamespace) {
+      throw new Error(
+        "Worker Preview Versions are not supported in Workers for Platforms",
+      );
+    }
+    // Upload worker version using the versions API
+    endpoint = `/accounts/${api.accountId}/workers/scripts/${props.workerName}/versions`;
+    method = "POST";
+  } else {
+    // Upload worker script with bindings
+    endpoint = props.dispatchNamespace
+      ? `/accounts/${api.accountId}/workers/dispatch/namespaces/${props.dispatchNamespace}/scripts/${props.workerName}`
+      : `/accounts/${api.accountId}/workers/scripts/${props.workerName}`;
+    method = "PUT";
+  }
+
+  return {
+    body,
+    endpoint,
+    method,
+  };
+}
+
+interface PutWorkerResult {
+  id: string;
+  number: number;
+  metadata: {
+    has_preview: boolean;
+  };
+  annotations?: {
+    "workers/tag"?: string;
+  };
+  deployment_id: string;
+}
+
+export async function putWorker(
+  api: CloudflareApi,
+  props: PutWorkerOptions,
+): Promise<PutWorkerResult> {
+  const {
+    //
+    workerName,
+    version,
+  } = props;
+
   return withExponentialBackoff(
     async () => {
-      const scriptName =
-        scriptMetadata.main_module ?? scriptMetadata.body_part!;
-
-      // Create FormData for the upload
-      const formData = new FormData();
-
-      // Add the actual script content as a named file part
-      formData.append(
-        scriptName,
-        new Blob([scriptContent], {
-          type: scriptMetadata.main_module
-            ? "application/javascript+module"
-            : "application/javascript",
-        }),
-        scriptName,
-      );
-
-      // Add metadata as JSON
-      formData.append(
-        "metadata",
-        new Blob([JSON.stringify(scriptMetadata)], {
-          type: "application/json",
-        }),
-      );
-
-      // Upload worker script with bindings
-      const uploadResponse = await api.put(
-        `/accounts/${api.accountId}/workers/scripts/${workerName}`,
-        formData,
-        {
-          headers: {
-            "Content-Type": "multipart/form-data",
-          },
+      const { body, endpoint, method } = await prepareWorkerUpload(api, props);
+      const uploadResponse = await api.fetch(endpoint, {
+        method,
+        headers: {
+          "Content-Type": "multipart/form-data",
         },
-      );
+        body,
+      });
 
       // Check if the upload was successful
       if (!uploadResponse.ok) {
-        await handleApiError(
-          uploadResponse,
-          "uploading worker script",
-          "worker",
-          workerName,
-        );
+        try {
+          return await handleApiError(
+            uploadResponse,
+            version ? "uploading worker version" : "uploading worker script",
+            "worker",
+            workerName,
+          );
+        } catch (error) {
+          if (error instanceof CloudflareApiError && error.status === 412) {
+            // this happens when adopting a Worker managed with Wrangler
+            // because wrangler includes a migration tag and we do not
+            // currently, the only way to discover the old_tag is through the error message
+            // Get Worker Script Settings is meant to return it (according to the docs)
+            // but it doesn't work at runtime
+            //
+            // so, we catch the error and parse out the tag and then retry
+            if (error.message.includes("when expected tag is")) {
+              const newTag = error.message.match(
+                /when expected tag is ['"]?(v\d+)['"]?/,
+              )?.[1];
+              if (newTag) {
+                return await putWorker(api, {
+                  ...props,
+                  migrationTag: newTag,
+                });
+              }
+            } else {
+              throw error;
+            }
+          } else {
+            throw error;
+          }
+        }
       }
-
-      return formData;
+      const responseData = (await uploadResponse.json()) as {
+        result: PutWorkerResult;
+      };
+      return responseData.result;
     },
-    (err) => err.status === 404 || err.status === 500 || err.status === 503,
+    (err) =>
+      err.status === 404 ||
+      err.status === 500 ||
+      err.status === 503 ||
+      // this is a transient error that cloudflare throws randomly
+      (err instanceof CloudflareApiError &&
+        err.status === 400 &&
+        err.message.match(/binding.*failed to generate/)),
     10,
     100,
   );
 }
 
-interface WorkerMetadata {
-  compatibility_date: string;
-  compatibility_flags?: string[];
-  bindings: WorkerBindingSpec[];
-  observability: {
-    enabled: boolean;
-  };
-  migrations?: SingleStepMigration;
-  main_module?: string;
-  body_part?: string;
-  tags?: string[];
-  assets?: {
-    jwt?: string;
-    keep_assets?: boolean;
-    config?: AssetsConfig;
-  };
-  cron_triggers?: {
-    cron: string;
-    suspended: boolean;
-  }[];
-}
-
-interface AssetUploadResult {
-  completionToken: string;
-  assetConfig?: AssetsConfig;
-}
-
-/**
- * Creates asset configuration object from provided config or defaults
- */
-function createAssetConfig(config?: AssetsConfig): AssetsConfig {
-  const assetConfig: AssetsConfig = {
-    html_handling: "auto-trailing-slash",
-  };
-
-  if (config) {
-    if (config._headers !== undefined) {
-      assetConfig._headers = config._headers;
-    }
-
-    if (config._redirects !== undefined) {
-      assetConfig._redirects = config._redirects;
-    }
-
-    if (config.html_handling !== undefined) {
-      assetConfig.html_handling = config.html_handling;
-    }
-
-    if (config.not_found_handling !== undefined) {
-      assetConfig.not_found_handling = config.not_found_handling;
-    }
-
-    if (config.run_worker_first !== undefined) {
-      assetConfig.run_worker_first = config.run_worker_first;
-    }
-
-    if (config.serve_directly !== undefined) {
-      assetConfig.serve_directly = config.serve_directly;
-    }
-  }
-
-  return assetConfig;
-}
-
-async function prepareWorkerMetadata<B extends Bindings>(
-  ctx: Context<Worker<B>>,
-  oldBindings: Bindings | undefined,
-  props: WorkerProps & {
-    compatibilityDate: string;
-    compatibilityFlags: string[];
-    workerName: string;
-  },
-  assetUploadResult?: AssetUploadResult,
-): Promise<WorkerMetadata> {
-  // Prepare metadata with bindings
-  const meta: WorkerMetadata = {
-    compatibility_date: props.compatibilityDate,
-    compatibility_flags: props.compatibilityFlags,
-    bindings: [],
-    observability: {
-      enabled: props.observability?.enabled !== false,
-    },
-    // TODO(sam): base64 encode instead? 0 collision risk vs readability.
-    tags: [`alchemy:id:${slugify(ctx.fqn)}`],
-    migrations: {
-      new_classes: props.migrations?.new_classes ?? [],
-      deleted_classes: props.migrations?.deleted_classes ?? [],
-      renamed_classes: props.migrations?.renamed_classes ?? [],
-      transferred_classes: props.migrations?.transferred_classes ?? [],
-      new_sqlite_classes: props.migrations?.new_sqlite_classes ?? [],
-    },
-  };
-
-  // If we have asset upload results, add them to the metadata
-  if (assetUploadResult) {
-    meta.assets = {
-      jwt: assetUploadResult.completionToken,
-    };
-
-    // Initialize config from assetUploadResult if it exists
-    if (assetUploadResult.assetConfig) {
-      meta.assets.config = {
-        ...assetUploadResult.assetConfig,
-      };
-    }
-
-    // If there's no config from assetUploadResult but we have props.assets,
-    // we need to create the config ourselves (this handles the case when no assets were uploaded)
-    if (!meta.assets.config && props.assets) {
-      meta.assets.config = createAssetConfig(props.assets);
-    }
-  }
-
-  const bindings = (props.bindings ?? {}) as Bindings;
-
-  // Convert bindings to the format expected by the API
-  for (const [bindingName, binding] of Object.entries(bindings)) {
-    // Create a copy of the binding to avoid modifying the original
-
-    if (typeof binding === "string") {
-      meta.bindings.push({
-        type: "plain_text",
-        name: bindingName,
-        text: binding,
-      });
-    } else if (binding === Self) {
-      meta.bindings.push({
-        type: "service",
-        name: bindingName,
-        service: props.workerName,
-      });
-    } else if (binding.type === "d1") {
-      meta.bindings.push({
-        type: "d1",
-        name: bindingName,
-        id: binding.id,
-      });
-    } else if (binding.type === "kv_namespace") {
-      meta.bindings.push({
-        type: "kv_namespace",
-        name: bindingName,
-        namespace_id:
-          "namespaceId" in binding ? binding.namespaceId : binding.id,
-      });
-    } else if (binding.type === "service") {
-      meta.bindings.push({
-        type: "service",
-        name: bindingName,
-        service: binding.name,
-      });
-    } else if (binding.type === "durable_object_namespace") {
-      meta.bindings.push({
-        type: "durable_object_namespace",
-        name: bindingName,
-        class_name: binding.className,
-        script_name: binding.scriptName,
-        environment: binding.environment,
-        namespace_id: binding.namespaceId,
-      });
-      configureClassMigration(binding, binding.id, binding.className);
-    } else if (binding.type === "r2_bucket") {
-      meta.bindings.push({
-        type: "r2_bucket",
-        name: bindingName,
-        bucket_name: binding.name,
-      });
-    } else if (binding.type === "assets") {
-      meta.bindings.push({
-        type: "assets",
-        name: bindingName,
-      });
-    } else if (binding.type === "secret") {
-      meta.bindings.push({
-        type: "secret_text",
-        name: bindingName,
-        text: binding.unencrypted,
-      });
-    } else if (binding.type === "workflow") {
-      meta.bindings.push({
-        type: "workflow",
-        name: bindingName,
-        workflow_name: binding.workflowName,
-        class_name: binding.className,
-        // this should be set if the Workflow is in another script ...
-        // script_name: ??,
-      });
-      // it's unclear whether this is needed, but it works both ways
-      // configureClassMigration(binding, binding.id, binding.className);
-    } else if (binding.type === "queue") {
-      meta.bindings.push({
-        type: "queue",
-        name: bindingName,
-        queue_name: binding.name,
-      });
-    } else if (binding.type === "pipeline") {
-      meta.bindings.push({
-        type: "pipelines",
-        name: bindingName,
-        pipeline: binding.name,
-      });
-    } else if (binding.type === "vectorize") {
-      meta.bindings.push({
-        type: "vectorize",
-        name: bindingName,
-        index_name: binding.name,
-      });
-    } else if (binding.type === "ai_gateway") {
-      // AI Gateway binding - just needs the name property
-      meta.bindings.push({
-        type: "ai",
-        name: bindingName,
-      });
-    } else if (binding.type === "hyperdrive") {
-      // Hyperdrive binding
-      meta.bindings.push({
-        type: "hyperdrive",
-        name: bindingName,
-        id: binding.hyperdriveId,
-      });
-    } else if (binding.type === "browser") {
-      meta.bindings.push({
-        type: "browser",
-        name: bindingName,
-      });
-    } else if (binding.type === "ai") {
-      meta.bindings.push({
-        type: "ai",
-        name: bindingName,
-      });
-    } else {
-      // @ts-expect-error - we should never reach here
-      throw new Error(`Unsupported binding type: ${binding.type}`);
-    }
-  }
-
-  function configureClassMigration(
-    binding: DurableObjectNamespace | Workflow,
-    stableId: string,
-    className: string,
-  ) {
-    const oldBinding: DurableObjectNamespace | Workflow | undefined =
-      Object.values(oldBindings ?? {})
-        ?.filter(
-          (b) =>
-            typeof b === "object" &&
-            (b.type === "durable_object_namespace" || b.type === "workflow"),
-        )
-        ?.find((b) => b.id === stableId);
-
-    if (!oldBinding) {
-      if (binding.type === "durable_object_namespace" && binding.sqlite) {
-        meta.migrations!.new_sqlite_classes!.push(className);
-      } else {
-        meta.migrations!.new_classes!.push(className);
-      }
-    } else if (oldBinding.className !== className) {
-      meta.migrations!.renamed_classes!.push({
-        from: oldBinding.className,
-        to: className,
-      });
-    }
-  }
-
-  // Convert env variables to plain_text bindings
-  // TODO(sam): remove Worker.env in favor of always bindings
-  if (props.env) {
-    for (const [key, value] of Object.entries(props.env)) {
-      meta.bindings.push({
-        name: key,
-        type: "plain_text",
-        text: value,
-      });
-    }
-  }
-
-  // Determine if we're using ESM or service worker format
-  const isEsModule = props.format !== "cjs"; // Default to ESM unless CJS is specified
-  const scriptName = isEsModule ? "worker.js" : "script";
-
-  if (isEsModule) {
-    // For ES modules format
-    meta.main_module = scriptName;
-  } else {
-    // For service worker format (CJS)
-    meta.body_part = scriptName;
-  }
-  if (process.env.DEBUG) {
-    console.log(meta);
-  }
-  return meta;
-}
-
-async function assertWorkerDoesNotExist<B extends Bindings>(
-  ctx: Context<Worker<B>>,
+const workerExists = async (
   api: CloudflareApi,
-  workerName: string,
+  options: {
+    name: string;
+    dispatchNamespace: string | undefined;
+  },
+) => {
+  const res = await api.get(
+    options.dispatchNamespace
+      ? `/accounts/${api.accountId}/workers/dispatch/namespaces/${options.dispatchNamespace}/scripts/${options.name}`
+      : `/accounts/${api.accountId}/workers/scripts/${options.name}`,
+  );
+  return res.status === 200;
+};
+
+async function assertWorkerDoesNotExist(
+  api: CloudflareApi,
+  scriptName: string,
 ) {
   const response = await api.get(
-    `/accounts/${api.accountId}/workers/scripts/${workerName}`,
+    `/accounts/${api.accountId}/workers/scripts/${scriptName}`,
   );
   if (response.status === 404) {
     return true;
   }
   if (response.status === 200) {
-    const metadata = await getWorkerScriptMetadata(api, workerName);
+    const metadata = await getScriptMetadata(api, scriptName);
 
     if (!metadata) {
       throw new Error(
@@ -979,16 +1580,8 @@ async function assertWorkerDoesNotExist<B extends Bindings>(
       );
     }
 
-    if (
-      metadata.default_environment?.script.tags.includes(
-        `alchemy:id:${slugify(ctx.fqn)}`,
-      )
-    ) {
-      return true;
-    }
-
     throw new Error(
-      `Worker with name '${workerName}' already exists. Please use a unique name.`,
+      `Worker with name '${scriptName}' already exists. Please use a unique name.`,
     );
   }
   throw new Error(
@@ -996,348 +1589,84 @@ async function assertWorkerDoesNotExist<B extends Bindings>(
   );
 }
 
-async function configureURL<B extends Bindings>(
-  ctx: Context<Worker<B>>,
+async function getScriptMetadata(
   api: CloudflareApi,
-  workerName: string,
-  url: boolean,
-) {
-  let workerUrl;
-  if (url) {
-    // Enable the workers.dev subdomain for this worker
-    await api.post(
-      `/accounts/${api.accountId}/workers/scripts/${workerName}/subdomain`,
-      { enabled: true, previews_enabled: true },
-      {
-        headers: { "Content-Type": "application/json" },
-      },
-    );
-
-    // Get the account's workers.dev subdomain
-    const subdomainResponse = await api.get(
-      `/accounts/${api.accountId}/workers/subdomain`,
-    );
-
-    if (!subdomainResponse.ok) {
-      throw new Error(
-        `Could not fetch workers.dev subdomain: ${subdomainResponse.status} ${subdomainResponse.statusText}`,
-      );
-    }
-    const subdomainData: {
-      result: {
-        subdomain: string;
-      };
-    } = await subdomainResponse.json();
-    const subdomain = subdomainData.result?.subdomain;
-
-    if (subdomain) {
-      workerUrl = `https://${workerName}.${subdomain}.workers.dev`;
-
-      // Add a delay when the subdomain is first created.
-      // This is to prevent an issue where a negative cache-hit
-      // causes the subdomain to be unavailable for 30 seconds.
-      if (ctx.phase === "create" || !ctx.output?.url) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-      }
-    }
-  } else if (url === false && ctx.output?.url) {
-    // Explicitly disable URL if it was previously enabled
-    const response = await api.post(
-      `/accounts/${api.accountId}/workers/scripts/${workerName}/subdomain`,
-      JSON.stringify({ enabled: false }),
-      {
-        headers: { "Content-Type": "application/json" },
-      },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to disable worker URL: ${response.status} ${response.statusText}`,
-      );
-    }
-  }
-  return workerUrl;
-}
-
-async function getWorkerScriptMetadata(
-  api: CloudflareApi,
-  workerName: string,
+  scriptName: string,
 ): Promise<WorkerScriptMetadata | undefined> {
-  const response = await api.get(
-    `/accounts/${api.accountId}/workers/services/${workerName}`,
+  const res = await api.get(
+    `/accounts/${api.accountId}/workers/services/${scriptName}`,
   );
-  if (response.status === 404) {
-    return undefined;
+  if (res.status === 404) {
+    return;
   }
-  if (!response.ok) {
+  if (!res.ok) {
     throw new Error(
-      `Error getting worker script metadata: ${response.status} ${response.statusText}`,
+      `Error getting worker script metadata: ${res.status} ${res.statusText}`,
     );
   }
-  return ((await response.json()) as any).result as WorkerScriptMetadata;
+  const json = (await res.json()) as { result: WorkerScriptMetadata };
+  return json.result;
 }
 
-async function getWorkerBindings(
-  api: CloudflareApi,
-  workerName: string,
-  environment = "production",
-) {
-  const response = await api.get(
-    `/accounts/${api.accountId}/workers/services/${workerName}/environments/${environment}/bindings`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    },
-  );
-
-  if (response.status === 404) {
-    return undefined;
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch bindings: ${response.status} ${response.statusText}`,
-    );
-  }
-
-  const data: any = await response.json();
-
-  return data.result;
-}
-
-/**
- * Interface for a file's metadata to be uploaded
- */
-interface FileMetadata {
-  hash: string;
-  size: number;
-}
-
-/**
- * Response from the assets upload session API
- */
-interface UploadSessionResponse {
-  result: {
-    jwt: string;
-    buckets: string[][];
-  };
-  success: boolean;
-  errors: any[];
-  messages: any[];
-}
-
-/**
- * Response from the file upload API
- */
-interface UploadResponse {
-  result: {
-    jwt: string;
-    buckets?: string[][];
-  };
-  success: boolean;
-  errors: any[];
-  messages: any[];
-}
-
-/**
- * Uploads assets to Cloudflare and returns a completion token
- *
- * @param api CloudflareApi instance
- * @param workerName Name of the worker
- * @param assets Assets resource containing files to upload
- * @param assetConfig Configuration for the assets
- * @returns Completion token for the assets upload
- */
-async function uploadAssets(
-  api: CloudflareApi,
-  workerName: string,
-  assets: Assets,
-  assetConfig?: WorkerProps["assets"],
-): Promise<AssetUploadResult> {
-  // Process the assets configuration once at the beginning
-  const processedConfig = createAssetConfig(assetConfig);
-
-  // Generate the file manifest
-  const fileMetadata: Record<string, FileMetadata> = {};
-
-  // Process each file in the assets
-  for (const file of assets.files) {
-    const { hash, size } = await calculateFileMetadata(file.filePath);
-    // Use the relative path as the key, ensuring it starts with a slash
-    const key = file.path.startsWith("/") ? file.path : `/${file.path}`;
-    fileMetadata[key] = { hash, size };
-  }
-
-  // Start the upload session
-  const uploadSessionUrl = `/accounts/${api.accountId}/workers/scripts/${workerName}/assets-upload-session`;
-  const uploadSessionResponse = await api.post(
-    uploadSessionUrl,
-    JSON.stringify({ manifest: fileMetadata }),
-    {
-      headers: { "Content-Type": "application/json" },
-    },
-  );
-
-  if (!uploadSessionResponse.ok) {
-    throw new Error(
-      `Failed to start assets upload session: ${uploadSessionResponse.status} ${uploadSessionResponse.statusText}`,
-    );
-  }
-
-  const sessionData =
-    (await uploadSessionResponse.json()) as UploadSessionResponse;
-
-  // If there are no buckets, assets are already uploaded or empty
-  if (!sessionData.result.buckets || sessionData.result.buckets.length === 0) {
-    return {
-      completionToken: sessionData.result.jwt,
-      assetConfig: processedConfig,
-    };
-  }
-
-  // Upload the files in batches as specified by the API
-  let completionToken = sessionData.result.jwt;
-  const buckets = sessionData.result.buckets;
-
-  // Process each bucket of files
-  for (const bucket of buckets) {
-    const formData = new FormData();
-
-    let totalBytes = 0;
-
-    // Add each file in the bucket to the form
-    for (const fileHash of bucket) {
-      // Find the file with this hash
-      const file = assets.files.find((f) => {
-        const filePath = f.path.startsWith("/") ? f.path : `/${f.path}`;
-        return fileMetadata[filePath]?.hash === fileHash;
-      });
-
-      if (!file) {
-        throw new Error(`Could not find file with hash ${fileHash}`);
-      }
-
-      // Read the file content
-      const fileContent = await fs.readFile(file.filePath);
-
-      // Convert to base64 as required by the API when using base64=true
-      const base64Content = fileContent.toString("base64");
-
-      // Add the file to the form with the hash as the key and set the correct content type
-      const blob = new Blob([base64Content], {
-        type: getContentType(file.filePath),
-      });
-      totalBytes += blob.size;
-      formData.append(fileHash, blob, fileHash);
-    }
-
-    // Upload this batch of files
-    const uploadResponse = await api.post(
-      `/accounts/${api.accountId}/workers/assets/upload?base64=true`,
-      formData,
-      {
-        headers: {
-          Authorization: `Bearer ${completionToken}`,
-          "Content-Type": "multipart/form-data",
-        },
-      },
-    );
-
-    if (!uploadResponse.ok) {
-      throw new Error(
-        `Failed to upload asset files: ${uploadResponse.status} ${uploadResponse.statusText}`,
-      );
-    }
-
-    const uploadData = (await uploadResponse.json()) as UploadResponse;
-    // Update the completion token for the next batch
-    if (uploadData.result.jwt) {
-      completionToken = uploadData.result.jwt;
-    }
-  }
-
-  // Return the final completion token with asset configuration
-  return {
-    completionToken,
-    assetConfig: processedConfig,
-  };
-}
-
-/**
- * Calculate the SHA-256 hash and size of a file
- *
- * @param filePath Path to the file
- * @returns Hash (first 32 chars of SHA-256) and size of the file
- */
-async function calculateFileMetadata(
-  filePath: string,
-): Promise<{ hash: string; size: number }> {
-  const hash = crypto.createHash("sha256");
-  const fileContent = await fs.readFile(filePath);
-
-  hash.update(fileContent);
-  const fileHash = hash.digest("hex").substring(0, 32); // First 32 chars of hash
-
-  return {
-    hash: fileHash,
-    size: fileContent.length,
-  };
-}
-
-/**
- * Lists and deletes all queue consumers for a specific worker
- * @param ctx Worker context containing eventSources
- * @param api CloudflareApi instance
- * @param workerName Name of the worker script
- */
-async function deleteQueueConsumers<B extends Bindings>(
-  ctx: Context<Worker<B>>,
-  api: CloudflareApi,
-  workerName: string,
-): Promise<void> {
-  const eventSources = ctx.output?.eventSources || [];
-
-  // Extract queue IDs from event sources
-  const queueIds = eventSources.flatMap((eventSource) => {
-    if (isQueue(eventSource)) {
-      return [eventSource.id];
-    }
-    if (isQueueEventSource(eventSource)) {
-      return [eventSource.queue.id];
-    }
-    return [];
-  });
-
-  // Process each queue associated with this worker
+async function deleteQueueConsumers(api: CloudflareApi, scriptName: string) {
+  const consumers = await listQueueConsumersForWorker(api, scriptName);
   await Promise.all(
-    queueIds.map(async (queueId) => {
-      try {
-        // List all consumers for this queue
-        const consumers = await listQueueConsumers(api, queueId);
-
-        // Filter consumers by worker name
-        const workerConsumers = consumers.filter(
-          (consumer) => consumer.scriptName === workerName,
-        );
-
-        // Delete all consumers for this worker in parallel
-        await Promise.all(
-          workerConsumers.map(async (consumer) => {
-            console.log(
-              `Deleting queue consumer ${consumer.id} for worker ${workerName}`,
-            );
-            // Use the deleteQueueConsumer function from queue-consumer.ts
-            await deleteQueueConsumer(api, consumer.queueId, consumer.id);
-          }),
-        );
-      } catch (err) {
-        if (err instanceof CloudflareApiError && err.status === 404) {
-          // this is OK
-        } else {
-          throw err;
-        }
-      }
+    consumers.map(async (consumer) => {
+      await deleteQueueConsumer(api, consumer.queueId, consumer.consumerId);
     }),
   );
+}
+
+export async function deleteWorker(
+  api: CloudflareApi,
+  props: {
+    scriptName: string;
+    dispatchNamespace?: string;
+  },
+) {
+  await withExponentialBackoff(
+    async () => {
+      const deleteResponse = await api.delete(
+        props.dispatchNamespace
+          ? `/accounts/${api.accountId}/workers/dispatch/namespaces/${props.dispatchNamespace}/scripts/${props.scriptName}?force=true`
+          : `/accounts/${api.accountId}/workers/scripts/${props.scriptName}?force=true`,
+      );
+
+      if (!deleteResponse.ok && deleteResponse.status !== 404) {
+        await handleApiError(
+          deleteResponse,
+          "delete",
+          "worker",
+          props.scriptName,
+        );
+      }
+    },
+    (err) =>
+      (err.status === 400 &&
+        err.message.includes(
+          "is still referenced by service bindings in Workers",
+        )) ||
+      err.status === 500 ||
+      err.status === 503,
+    10,
+    100,
+  );
+}
+
+async function getVersionMetadata(
+  api: CloudflareApi,
+  scriptName: string,
+  deploymentId: string,
+) {
+  const response = await api.get(
+    `/accounts/${api.accountId}/workers/scripts/${scriptName}/versions/${deploymentId}`,
+  );
+  const result = (await response.json()) as {
+    result: {
+      resources: {
+        bindings: WorkerBindingSpec[];
+      };
+    };
+  };
+  return result.result;
 }

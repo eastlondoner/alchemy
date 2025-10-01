@@ -1,12 +1,13 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
+import type { Context } from "../context.ts";
+import { Resource, ResourceKind } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
 import {
   createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
-} from "./api.js";
-import type { VectorizeIndex } from "./vectorize-index.js";
+} from "./api.ts";
+import type { VectorizeIndex } from "./vectorize-index.ts";
 
 /**
  * Properties for creating or deleting a Vectorize Metadata Index
@@ -28,12 +29,16 @@ export interface VectorizeMetadataIndexProps extends CloudflareApiOptions {
   indexType: "string" | "number" | "boolean";
 }
 
+export function isVectorizeMetadataIndex(
+  resource: any,
+): resource is VectorizeMetadataIndex {
+  return resource?.[ResourceKind] === "cloudflare::VectorizeMetadataIndex";
+}
+
 /**
  * Output returned after Vectorize Metadata Index creation/deletion
  */
-export interface VectorizeMetadataIndex
-  extends Resource<"cloudflare::VectorizeMetadataIndex">,
-    VectorizeMetadataIndexProps {
+export interface VectorizeMetadataIndex extends VectorizeMetadataIndexProps {
   /**
    * ID of this metadata index (derived from propertyName)
    */
@@ -82,7 +87,7 @@ export const VectorizeMetadataIndex = Resource(
   "cloudflare::VectorizeMetadataIndex",
   async function (
     this: Context<VectorizeMetadataIndex>,
-    id: string,
+    _id: string,
     props: VectorizeMetadataIndexProps,
   ): Promise<VectorizeMetadataIndex> {
     const api = await createCloudflareApi(props);
@@ -107,6 +112,20 @@ export const VectorizeMetadataIndex = Resource(
       return this.destroy();
     }
     if (this.phase === "update") {
+      if (
+        props.email === this.props.email &&
+        props.index?.id === this.props.index?.id &&
+        props.propertyName === this.props.propertyName &&
+        props.indexType === this.props.indexType
+      ) {
+        // Update operation is not supported
+        if (!this.scope.quiet) {
+          logger.warn(
+            `Attempted to update Vectorize metadata index ${this.props.propertyName} but it was a no-op.`,
+          );
+        }
+        return this.output;
+      }
       // Update operation is not supported
       throw new Error(
         "Updating Vectorize metadata indexes is not supported by the Cloudflare API. " +
@@ -115,14 +134,14 @@ export const VectorizeMetadataIndex = Resource(
     }
     const indexData = await createMetadataIndex(api, indexName, props);
 
-    return this({
+    return {
       id: propertyName, // Use propertyName as ID
       index: props.index,
       propertyName: props.propertyName,
       indexType: props.indexType,
       accountId: api.accountId,
       mutationId: indexData.result.mutationId,
-    });
+    };
   },
 );
 

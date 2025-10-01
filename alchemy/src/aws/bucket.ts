@@ -1,18 +1,8 @@
-import {
-  CreateBucketCommand,
-  DeleteBucketCommand,
-  GetBucketAclCommand,
-  GetBucketLocationCommand,
-  GetBucketTaggingCommand,
-  GetBucketVersioningCommand,
-  HeadBucketCommand,
-  NoSuchBucket,
-  PutBucketTaggingCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { ignore } from "../util/ignore.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { ignore } from "../util/ignore.ts";
+import { importPeer } from "../util/peer.ts";
+import { retry } from "./retry.ts";
 
 /**
  * Properties for creating or updating an S3 bucket
@@ -21,8 +11,10 @@ export interface BucketProps {
   /**
    * The name of the bucket. Must be globally unique across all AWS accounts.
    * Should be lowercase alphanumeric characters or hyphens.
+   *
+   * @default ${app}-${stage}-${id}
    */
-  bucketName: string;
+  bucketName?: string;
 
   /**
    * Optional tags to apply to the bucket for organization and cost tracking.
@@ -34,12 +26,17 @@ export interface BucketProps {
 /**
  * Output returned after S3 bucket creation/update
  */
-export interface Bucket extends Resource<"s3::Bucket">, BucketProps {
+export interface Bucket extends BucketProps {
   /**
    * The ARN (Amazon Resource Name) of the bucket
    * Format: arn:aws:s3:::bucket-name
    */
   arn: string;
+
+  /**
+   * Name of the Bucket.
+   */
+  bucketName: string;
 
   /**
    * The global domain name for the bucket
@@ -129,56 +126,85 @@ export interface Bucket extends Resource<"s3::Bucket">, BucketProps {
 export const Bucket = Resource(
   "s3::Bucket",
   async function (this: Context<Bucket>, id: string, props: BucketProps) {
+    const {
+      CreateBucketCommand,
+      DeleteBucketCommand,
+      GetBucketAclCommand,
+      GetBucketLocationCommand,
+      GetBucketTaggingCommand,
+      GetBucketVersioningCommand,
+      HeadBucketCommand,
+      NoSuchBucket,
+      PutBucketTaggingCommand,
+      S3Client,
+    } = await importPeer(import("@aws-sdk/client-s3"), "s3::Bucket");
     const client = new S3Client({});
+
+    const bucketName =
+      props.bucketName ??
+      this.output?.bucketName ??
+      this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output.bucketName !== bucketName) {
+      this.replace();
+    }
 
     if (this.phase === "delete") {
       await ignore(NoSuchBucket.name, () =>
-        client.send(
-          new DeleteBucketCommand({
-            Bucket: props.bucketName,
-          }),
+        retry(() =>
+          client.send(
+            new DeleteBucketCommand({
+              Bucket: bucketName,
+            }),
+          ),
         ),
       );
       return this.destroy();
     }
     try {
       // Check if bucket exists
-      await client.send(
-        new HeadBucketCommand({
-          Bucket: props.bucketName,
-        }),
+      await retry(() =>
+        client.send(
+          new HeadBucketCommand({
+            Bucket: bucketName,
+          }),
+        ),
       );
 
       // Update tags if they changed and bucket exists
       if (this.phase === "update" && props.tags) {
-        await client.send(
-          new PutBucketTaggingCommand({
-            Bucket: props.bucketName,
-            Tagging: {
-              TagSet: Object.entries(props.tags).map(([Key, Value]) => ({
-                Key,
-                Value,
-              })),
-            },
-          }),
-        );
-      }
-    } catch (error: any) {
-      if (error.name === "NotFound") {
-        // Create bucket if it doesn't exist
-        await client.send(
-          new CreateBucketCommand({
-            Bucket: props.bucketName,
-            // Add tags during creation if specified
-            ...(props.tags && {
+        await retry(() =>
+          client.send(
+            new PutBucketTaggingCommand({
+              Bucket: bucketName,
               Tagging: {
-                TagSet: Object.entries(props.tags).map(([Key, Value]) => ({
+                TagSet: Object.entries(props.tags!).map(([Key, Value]) => ({
                   Key,
                   Value,
                 })),
               },
             }),
-          }),
+          ),
+        );
+      }
+    } catch (error: any) {
+      if (error.name === "NotFound") {
+        // Create bucket if it doesn't exist
+        await retry(() =>
+          client.send(
+            new CreateBucketCommand({
+              Bucket: bucketName,
+              // Add tags during creation if specified
+              ...(props.tags && {
+                Tagging: {
+                  TagSet: Object.entries(props.tags).map(([Key, Value]) => ({
+                    Key,
+                    Value,
+                  })),
+                },
+              }),
+            }),
+          ),
         );
       } else {
         throw error;
@@ -188,11 +214,15 @@ export const Bucket = Resource(
     // Get bucket details
     const [locationResponse, versioningResponse, aclResponse] =
       await Promise.all([
-        client.send(new GetBucketLocationCommand({ Bucket: props.bucketName })),
-        client.send(
-          new GetBucketVersioningCommand({ Bucket: props.bucketName }),
+        retry(() =>
+          client.send(new GetBucketLocationCommand({ Bucket: bucketName })),
         ),
-        client.send(new GetBucketAclCommand({ Bucket: props.bucketName })),
+        retry(() =>
+          client.send(new GetBucketVersioningCommand({ Bucket: bucketName })),
+        ),
+        retry(() =>
+          client.send(new GetBucketAclCommand({ Bucket: bucketName })),
+        ),
       ]);
 
     const region = locationResponse.LocationConstraint || "us-east-1";
@@ -201,8 +231,8 @@ export const Bucket = Resource(
     let tags = props.tags;
     if (!tags) {
       try {
-        const taggingResponse = await client.send(
-          new GetBucketTaggingCommand({ Bucket: props.bucketName }),
+        const taggingResponse = await retry(() =>
+          client.send(new GetBucketTaggingCommand({ Bucket: bucketName })),
         );
         tags = Object.fromEntries(
           taggingResponse.TagSet?.map(({ Key, Value }) => [Key, Value]) || [],
@@ -214,17 +244,17 @@ export const Bucket = Resource(
       }
     }
 
-    return this({
-      bucketName: props.bucketName,
-      arn: `arn:aws:s3:::${props.bucketName}`,
-      bucketDomainName: `${props.bucketName}.s3.amazonaws.com`,
-      bucketRegionalDomainName: `${props.bucketName}.s3.${region}.amazonaws.com`,
+    return {
+      bucketName: bucketName,
+      arn: `arn:aws:s3:::${bucketName}`,
+      bucketDomainName: `${bucketName}.s3.amazonaws.com`,
+      bucketRegionalDomainName: `${bucketName}.s3.${region}.amazonaws.com`,
       region,
       hostedZoneId: getHostedZoneId(region),
       versioningEnabled: versioningResponse.Status === "Enabled",
       acl: aclResponse.Grants?.[0]?.Permission?.toLowerCase(),
       ...(tags && { tags }),
-    });
+    };
   },
 );
 

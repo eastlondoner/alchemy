@@ -1,12 +1,13 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
+import type { Context } from "../context.ts";
+import { Resource, ResourceKind } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
 import {
-  type CloudflareApi,
   createCloudflareApi,
+  type CloudflareApi,
   type CloudflareApiOptions,
-} from "./api.js";
+} from "./api.ts";
 
 /**
  * Settings for compression of pipeline output
@@ -182,7 +183,7 @@ export interface PipelineProps extends CloudflareApiOptions {
   /**
    * Name of the pipeline
    *
-   * @default id
+   * @default ${app}-${stage}-${id}
    */
   name?: string;
 
@@ -209,6 +210,16 @@ export interface PipelineProps extends CloudflareApiOptions {
    * @default true
    */
   delete?: boolean;
+
+  /**
+   * Whether to adopt an existing pipeline instead of creating a new one.
+   * If set to true, the resource will attempt to adopt an existing pipeline with the same name
+   *
+   * @default false
+   */
+  adopt?: boolean;
+
+  dev?: { remote?: boolean };
 }
 
 /**
@@ -218,37 +229,40 @@ export interface PipelineRecord {
   [key: string]: any;
 }
 
+export function isPipeline(resource: any): resource is Pipeline {
+  return resource?.[ResourceKind] === "cloudflare::Pipeline";
+}
+
 /**
  * Output returned after Pipeline creation/update
  */
-export interface Pipeline<T extends PipelineRecord = PipelineRecord>
-  extends Resource<"cloudflare::Pipeline">,
-    PipelineProps {
-  /**
-   * Type identifier for the Pipeline resource
-   */
-  type: "pipeline";
+export type Pipeline<_T extends PipelineRecord = PipelineRecord> =
+  PipelineProps & {
+    /**
+     * Type identifier for the Pipeline resource
+     */
+    type: "pipeline";
 
-  /**
-   * The unique ID of the pipeline
-   */
-  id: string;
+    /**
+     * The unique ID of the pipeline
+     */
+    id: string;
 
-  /**
-   * The name of the pipeline
-   */
-  name: string;
+    /**
+     * The name of the pipeline
+     */
+    name: string;
 
-  /**
-   * HTTP endpoint URL for the pipeline
-   */
-  endpoint: string;
+    /**
+     * HTTP endpoint URL for the pipeline
+     */
+    endpoint: string;
 
-  /**
-   * Version of the pipeline
-   */
-  version: number;
-}
+    /**
+     * Version of the pipeline
+     */
+    version: number;
+  };
 
 /**
  * Creates and manages Cloudflare Pipelines.
@@ -322,7 +336,26 @@ export const Pipeline = Resource("cloudflare::Pipeline", async function <
   Pipeline<T>
 > {
   const api = await createCloudflareApi(props);
-  const pipelineName = props.name ?? id;
+  const pipelineName =
+    props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
+  if (this.scope.local && !props.dev?.remote) {
+    return {
+      type: "pipeline",
+      id: this.output?.id ?? "",
+      name: this.output?.name ?? pipelineName,
+      endpoint: this.output?.endpoint ?? "",
+      version: this.output?.version ?? 0,
+      source: this.output?.source ?? [],
+      destination: props.destination,
+      compression: props.compression,
+      accountId: this.output?.accountId ?? "",
+    };
+  }
+
+  if (this.phase === "update" && this.output?.name !== pipelineName) {
+    await renamePipeline(api, this.output.name, pipelineName);
+  }
 
   if (this.phase === "delete") {
     if (props.delete !== false) {
@@ -335,13 +368,38 @@ export const Pipeline = Resource("cloudflare::Pipeline", async function <
   }
   let pipelineData: CloudflarePipelineResponse;
 
-  if (this.phase === "create") {
-    pipelineData = await createPipeline(api, pipelineName, props);
+  if (this.phase === "create" || !this.output?.id) {
+    // Check if we should adopt an existing pipeline
+    try {
+      // Try to create pipeline first
+      pipelineData = await createPipeline(api, pipelineName, props);
+    } catch (error) {
+      // If creation fails with 409 (conflict), adopt existing pipeline
+      if (
+        error instanceof CloudflareApiError &&
+        (error.status === 409 ||
+          (error.status === 400 &&
+            error.message.includes("Pipeline with this name already exists")))
+      ) {
+        if (props.adopt ?? this.scope.adopt) {
+          console.warn(
+            "Pipeline already exists, adopting existing Cloudflare Pipeline:",
+            pipelineName,
+          );
+          pipelineData = await getPipeline(api, pipelineName);
+        } else {
+          throw error;
+        }
+      } else {
+        // For any other error, rethrow
+        throw error;
+      }
+    }
   } else {
     // Update operation
     if (this.output?.id) {
       // Check if name is being changed, which is not allowed
-      if (props.name !== this.output.name) {
+      if (pipelineName !== this.output.name) {
         throw new Error(
           "Cannot update Pipeline name after creation. Pipeline name is immutable.",
         );
@@ -351,7 +409,7 @@ export const Pipeline = Resource("cloudflare::Pipeline", async function <
       pipelineData = await updatePipeline(api, pipelineName, props);
     } else {
       // If no ID exists, fall back to creating a new pipeline
-      console.log(
+      logger.log(
         "No existing Pipeline ID found, creating new Cloudflare Pipeline:",
         pipelineName,
       );
@@ -359,7 +417,7 @@ export const Pipeline = Resource("cloudflare::Pipeline", async function <
     }
   }
 
-  return this({
+  return {
     type: "pipeline",
     id: pipelineData.result.id,
     name: pipelineName,
@@ -374,7 +432,7 @@ export const Pipeline = Resource("cloudflare::Pipeline", async function <
     destination: props.destination, // Use the input destination, not the API response
     compression: props.compression,
     accountId: api.accountId,
-  });
+  };
 });
 
 interface CloudflarePipelineResponse {
@@ -463,6 +521,7 @@ export async function createPipeline(
   api: CloudflareApi,
   pipelineName: string,
   props: PipelineProps,
+  attempt = 0,
 ): Promise<CloudflarePipelineResponse> {
   // Prepare the create payload
   const createPayload = preparePipelinePayload(api, pipelineName, props);
@@ -473,6 +532,11 @@ export async function createPipeline(
   );
 
   if (!createResponse.ok) {
+    if (createResponse.status === 404 && attempt < 3) {
+      // bucket does not exist, this might be transient, let's retry
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (1 + attempt)));
+      return await createPipeline(api, pipelineName, props, attempt + 1);
+    }
     return await handleApiError(
       createResponse,
       "creating",
@@ -514,6 +578,49 @@ export async function updatePipeline(
       "updating",
       "Pipeline",
       pipelineName,
+    );
+  }
+
+  return (await updateResponse.json()) as CloudflarePipelineResponse;
+}
+
+/**
+ * Rename a pipeline
+ *
+ * @param api - Cloudflare API instance
+ * @param currentName - Current name of the pipeline
+ * @param newName - New name for the pipeline
+ * @returns Updated pipeline response with the new name
+ *
+ * @see https://developers.cloudflare.com/api/resources/pipelines/methods/update/
+ */
+export async function renamePipeline(
+  api: CloudflareApi,
+  currentName: string,
+  newName: string,
+): Promise<CloudflarePipelineResponse> {
+  // Get the current pipeline configuration
+  const currentPipeline = await getPipeline(api, currentName);
+
+  // Build the update payload with the new name
+  const updatePayload = {
+    name: newName,
+    source: currentPipeline.result.source,
+    destination: currentPipeline.result.destination,
+  };
+
+  // Use the update endpoint with the current name in the path and new name in the body
+  const updateResponse = await api.put(
+    `/accounts/${api.accountId}/pipelines/${currentName}`,
+    updatePayload,
+  );
+
+  if (!updateResponse.ok) {
+    return await handleApiError(
+      updateResponse,
+      "renaming",
+      "Pipeline",
+      `${currentName} -> ${newName}`,
     );
   }
 

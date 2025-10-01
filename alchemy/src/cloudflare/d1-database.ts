@@ -1,13 +1,28 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { CloudflareApiError, handleApiError } from "./api-error.js";
+import type { Context } from "../context.ts";
+import { Resource, ResourceKind } from "../resource.ts";
+import { Scope } from "../scope.ts";
+import { logger } from "../util/logger.ts";
+import { CloudflareApiError, handleApiError } from "./api-error.ts";
 import {
   createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
-} from "./api.js";
-import { cloneD1Database } from "./d1-clone.js";
-import { applyMigrations, listMigrationsFiles } from "./d1-migrations.js";
+} from "./api.ts";
+import { cloneD1Database } from "./d1-clone.ts";
+import { applyLocalD1Migrations } from "./d1-local-migrations.ts";
+import { applyMigrations, listMigrationsFiles } from "./d1-migrations.ts";
+import { deleteMiniflareBinding } from "./miniflare/delete.ts";
+
+const DEFAULT_MIGRATIONS_TABLE = "d1_migrations";
+
+type PrimaryLocationHint =
+  | "wnam"
+  | "enam"
+  | "weur"
+  | "eeur"
+  | "apac"
+  | "auto"
+  | (string & {});
 
 /**
  * Properties for creating or updating a D1 Database
@@ -16,7 +31,7 @@ export interface D1DatabaseProps extends CloudflareApiOptions {
   /**
    * Name of the database
    *
-   * @default id
+   * @default ${app}-${stage}-${id}
    */
   name?: string;
 
@@ -24,14 +39,7 @@ export interface D1DatabaseProps extends CloudflareApiOptions {
    * Optional primary location hint for the database
    * Indicates the primary geographical location data will be stored
    */
-  primaryLocationHint?:
-    | "wnam"
-    | "enam"
-    | "weur"
-    | "eeur"
-    | "apac"
-    | "auto"
-    | string;
+  primaryLocationHint?: PrimaryLocationHint;
 
   /**
    * Read replication configuration
@@ -91,49 +99,65 @@ export interface D1DatabaseProps extends CloudflareApiOptions {
    * This is analogous to wrangler's `migrations_dir`.
    */
   migrationsDir?: string;
+  /**
+   * Whether to emulate the database locally when Alchemy is running in watch mode.
+   */
+  dev?: {
+    /**
+     * Whether to run the database remotely instead of locally
+     * @default false
+     */
+    remote?: boolean;
+
+    /**
+     * Set when `Scope.local` is true to force update to the database even if it was already deployed live.
+     * @internal
+     */
+    force?: boolean;
+  };
+}
+
+export function isD1Database(resource: any): resource is D1Database {
+  return resource?.[ResourceKind] === "cloudflare::D1Database";
 }
 
 /**
  * Output returned after D1 Database creation/update
  */
-export type D1Database = Resource<"cloudflare::D1Database"> &
-  D1DatabaseProps & {
-    type: "d1";
+export type D1Database = Pick<
+  D1DatabaseProps,
+  | "migrationsDir"
+  | "migrationsTable"
+  | "primaryLocationHint"
+  | "readReplication"
+> & {
+  type: "d1";
+  /**
+   * The unique ID of the database (UUID)
+   */
+  id: string;
+
+  /**
+   * The name of the database
+   */
+  name: string;
+
+  /**
+   * Development mode properties
+   * @internal
+   */
+  dev: {
     /**
-     * The unique ID of the database (UUID)
+     * The ID of the database in development mode
      */
     id: string;
 
     /**
-     * The name of the database
+     * Whether the database is running remotely
      */
-    name: string;
-
-    /**
-     * File size of the database
-     */
-    fileSize: number;
-
-    /**
-     * Number of tables in the database
-     */
-    numTables: number;
-
-    /**
-     * Version of the database
-     */
-    version: string;
-
-    /**
-     * Read replication configuration
-     */
-    readReplication?: {
-      /**
-       * Read replication mode
-       */
-      mode: "auto" | "disabled";
-    };
+    remote: boolean;
   };
+};
 
 /**
  * Creates and manages Cloudflare D1 Databases.
@@ -172,6 +196,23 @@ export type D1Database = Resource<"cloudflare::D1Database"> &
  * });
  *
  * @example
+ * // Create a database with migrations using a custom migration table (compatible with Drizzle)
+ * const dbWithCustomMigrations = await D1Database("mydb", {
+ *   name: "mydb",
+ *   migrationsDir: "./migrations",
+ *   migrationsTable: "drizzle_migrations",
+ * });
+ *
+ * @example
+ * // Create a database with custom migration table and ID column for maximum compatibility
+ * const dbWithCustomMigrations = await D1Database("mydb", {
+ *   name: "mydb",
+ *   migrationsDir: "./migrations",
+ *   migrationsTable: "custom_migrations",
+ *   migrationsIdColumn: "migration_name", // explicit column name override
+ * });
+ *
+ * @example
  * // Clone an existing database by ID
  * const clonedDb = await D1Database("cloned-db", {
  *   name: "cloned-db",
@@ -196,45 +237,95 @@ export type D1Database = Resource<"cloudflare::D1Database"> &
  */
 export async function D1Database(
   id: string,
-  props: Omit<D1DatabaseProps, "migrationsFiles">,
-) {
+  props: Omit<D1DatabaseProps, "migrationsFiles"> = {},
+): Promise<D1Database> {
   const migrationsFiles = props.migrationsDir
     ? await listMigrationsFiles(props.migrationsDir)
     : [];
 
-  return D1DatabaseResource(id, {
+  return _D1Database(id, {
     ...props,
     migrationsFiles,
+    dev: {
+      ...(props.dev ?? {}),
+      // force local migrations to run even if the database was already deployed live
+      // this property will oscillate from true to false depending on the dev vs live deployment
+      force: Scope.current.local,
+    },
   });
 }
 
-export const D1DatabaseResource = Resource(
+const _D1Database = Resource(
   "cloudflare::D1Database",
   async function (
     this: Context<D1Database>,
     id: string,
     props: D1DatabaseProps = {},
   ): Promise<D1Database> {
+    const databaseName =
+      props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output?.name !== databaseName) {
+      this.replace();
+    }
+
+    const local = this.scope.local && !props.dev?.remote;
+    const dev = {
+      id: this.output?.dev?.id ?? this.output?.id ?? id,
+      remote: props.dev?.remote ?? false,
+    };
+    const adopt = props.adopt ?? this.scope.adopt;
+
+    if (local) {
+      if (props.migrationsFiles && props.migrationsFiles.length > 0) {
+        await applyLocalD1Migrations({
+          databaseId: dev.id,
+          migrationsTable: props.migrationsTable ?? DEFAULT_MIGRATIONS_TABLE,
+          migrations: props.migrationsFiles,
+          rootDir: this.scope.rootDir,
+        });
+      }
+      return {
+        type: "d1",
+        id: this.output?.id ?? "",
+        name: databaseName,
+        readReplication: props.readReplication,
+        primaryLocationHint: props.primaryLocationHint,
+        migrationsDir: props.migrationsDir,
+        migrationsTable: props.migrationsTable ?? DEFAULT_MIGRATIONS_TABLE,
+        dev,
+      };
+    }
+
     const api = await createCloudflareApi(props);
-    const databaseName = props.name ?? id;
 
     if (this.phase === "delete") {
-      console.log("Deleting D1 database:", databaseName);
-      if (props.delete !== false) {
-        // Delete D1 database
-        console.log("Deleting D1 database:", databaseName);
-        await deleteDatabase(api, this.output?.id);
+      if (this.output.dev?.id) {
+        await deleteMiniflareBinding(this.scope, "d1", this.output.dev.id);
       }
-
+      if (props.delete !== false && this.output?.id) {
+        await deleteDatabase(api, this.output.id);
+      }
       // Return void (a deleted database has no content)
       return this.destroy();
     }
     let dbData: CloudflareD1Response;
 
-    if (this.phase === "create") {
-      console.log("Creating D1 database:", databaseName);
+    if (
+      this.phase === "create" ||
+      // this is true IFF the database was created locally before any live deployment
+      // in that case, we should still go through the create flow for "update"
+      // after that, the ID will remain the UUID for the lifetime of the database
+      !this.output?.id
+    ) {
+      logger.log("Creating D1 database:", databaseName);
       try {
         dbData = await createDatabase(api, databaseName, props);
+
+        // Read replication cannot be set during creation, so update it after creation
+        if (props.readReplication && dbData.result.uuid) {
+          dbData = await updateDatabase(api, dbData.result.uuid, props);
+        }
 
         // If clone property is provided, perform cloning after database creation
         if (props.clone && dbData.result.uuid) {
@@ -243,11 +334,11 @@ export const D1DatabaseResource = Resource(
       } catch (error) {
         // Check if this is a "database already exists" error and adopt is enabled
         if (
-          props.adopt &&
+          adopt &&
           error instanceof CloudflareApiError &&
           error.message.includes("already exists")
         ) {
-          console.log(`Database ${databaseName} already exists, adopting it`);
+          logger.log(`Database ${databaseName} already exists, adopting it`);
           // Find the existing database by name
           const databases = await listDatabases(api, databaseName);
           const existingDb = databases.find((db) => db.name === databaseName);
@@ -263,7 +354,7 @@ export const D1DatabaseResource = Resource(
 
           // Update the database with the provided properties
           if (props.readReplication) {
-            console.log(
+            logger.log(
               `Updating adopted database ${databaseName} with new properties`,
             );
             dbData = await updateDatabase(api, existingDb.id, props);
@@ -273,35 +364,33 @@ export const D1DatabaseResource = Resource(
           throw error;
         }
       }
-    } else {
-      // Update operation
-      if (this.output?.id) {
-        // Only read_replication can be modified in update
-        if (
-          props.primaryLocationHint &&
-          props.primaryLocationHint !== this.output?.primaryLocationHint
-        ) {
-          throw new Error(
-            `Cannot update primaryLocationHint from '${this.output.primaryLocationHint}' to '${props.primaryLocationHint}' after database creation.`,
-          );
-        }
-        console.log("Updating D1 database:", databaseName);
-        // Update the database with new properties
-        dbData = await updateDatabase(api, this.output.id, props);
-      } else {
-        // If no ID exists, fall back to creating a new database
-        console.log(
-          "No existing database ID found, creating new D1 database:",
-          databaseName,
+    } else if (this.output?.id) {
+      // Only read_replication can be modified in update
+      if (
+        props.primaryLocationHint &&
+        props.primaryLocationHint !== this.output?.primaryLocationHint
+      ) {
+        throw new Error(
+          `Cannot update primaryLocationHint from '${this.output.primaryLocationHint}' to '${props.primaryLocationHint}' after database creation.`,
         );
-        dbData = await createDatabase(api, databaseName, props);
       }
+      logger.log("Updating D1 database:", databaseName);
+      // Update the database with new properties
+      dbData = await updateDatabase(api, this.output.id, props);
+    } else {
+      // If no ID exists, fall back to creating a new database
+      logger.log(
+        "No existing database ID found, creating new D1 database:",
+        databaseName,
+      );
+      dbData = await createDatabase(api, databaseName, props);
     }
 
     // Run migrations if provided
     if (props.migrationsFiles && props.migrationsFiles.length > 0) {
       try {
-        const migrationsTable = props.migrationsTable || "d1_migrations";
+        const migrationsTable =
+          props.migrationsTable || DEFAULT_MIGRATIONS_TABLE;
         const databaseId = dbData.result.uuid || this.output?.id;
 
         if (!databaseId) {
@@ -316,23 +405,24 @@ export const D1DatabaseResource = Resource(
           api,
         });
       } catch (migrationErr) {
-        console.error("Failed to apply D1 migrations:", migrationErr);
+        logger.error("Failed to apply D1 migrations:", migrationErr);
         throw migrationErr;
       }
     }
-
-    return this({
+    if (!dbData.result.uuid) {
+      // TODO(sam): why would this ever happen?
+      throw new Error("Database ID not found");
+    }
+    return {
       type: "d1",
-      id: dbData.result.uuid || "",
+      id: dbData.result.uuid!,
       name: databaseName,
-      fileSize: dbData.result.file_size,
-      numTables: dbData.result.num_tables,
-      version: dbData.result.version,
       readReplication: dbData.result.read_replication,
       primaryLocationHint: props.primaryLocationHint,
-      accountId: api.accountId,
+      dev,
       migrationsDir: props.migrationsDir,
-    });
+      migrationsTable: props.migrationsTable ?? DEFAULT_MIGRATIONS_TABLE,
+    };
   },
 );
 
@@ -417,7 +507,7 @@ export async function deleteDatabase(
   databaseId?: string,
 ): Promise<void> {
   if (!databaseId) {
-    console.log("No database ID provided, skipping delete");
+    logger.log("No database ID provided, skipping delete");
     return;
   }
 
@@ -554,7 +644,7 @@ async function cloneDb(
   }
 
   // Perform the cloning
-  console.log(`Cloning data from database ${sourceId} to ${targetDbId}`);
+  logger.log(`Cloning data from database ${sourceId} to ${targetDbId}`);
   await cloneD1Database(api, {
     sourceDatabaseId: sourceId,
     targetDatabaseId: targetDbId,

@@ -1,29 +1,25 @@
-import { describe, expect } from "bun:test";
-import { alchemy } from "../../src/alchemy.js";
-import { destroy } from "../../src/destroy.js";
-import { createNeonApi } from "../../src/neon/api.js";
-import {
-  type NeonBranch,
-  type NeonDatabase,
-  type NeonEndpoint,
-  NeonProject,
-  type NeonRole,
-} from "../../src/neon/project.js";
-import { BRANCH_PREFIX } from "../util.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { destroy } from "../../src/destroy.ts";
+import { createNeonApi } from "../../src/neon/api.ts";
+import { NeonProject } from "../../src/neon/project.ts";
+import { BRANCH_PREFIX } from "../util.ts";
 // must import this or else alchemy.test won't exist
-import "../../src/test/bun.js";
+import "../../src/test/vitest.ts";
 
 // Create API client for verification
 const api = createNeonApi();
 
-const test = alchemy.test(import.meta);
+const test = alchemy.test(import.meta, {
+  prefix: BRANCH_PREFIX,
+});
 
 describe("NeonProject Resource", () => {
   // Use BRANCH_PREFIX for deterministic, non-colliding resource names
   const testId = `${BRANCH_PREFIX}-test-neon-project`;
 
   // Helper function to generate a unique project name
-  const generateProjectName = () => `Test Project ${testId}-${Date.now()}`;
+  const generateProjectName = () => `Test Project ${testId}}`;
 
   test("create, update, and delete neon project", async (scope) => {
     let project: NeonProject | undefined;
@@ -33,26 +29,26 @@ describe("NeonProject Resource", () => {
       project = await NeonProject(testId, {
         name: projectName,
         region_id: "aws-us-east-1",
-        pg_version: 15,
+        pg_version: 16,
       });
 
       expect(project.id).toBeTruthy();
       expect(project.name).toEqual(projectName);
       expect(project.region_id).toEqual("aws-us-east-1");
-      expect(project.pg_version).toEqual(15);
+      expect(project.pg_version).toEqual(16);
       expect(project.created_at).toBeTruthy();
       expect(project.updated_at).toBeTruthy();
 
       // Verify the additional properties are included
       expect(project.branch).toBeTruthy();
-      const branch: NeonBranch = project.branch!;
+      const branch = project.branch!;
       expect(branch.name).toBeTruthy();
       expect(branch.id).toBeTruthy();
       expect(branch.project_id).toEqual(project.id);
       expect(branch.current_state).toBeTruthy();
 
       expect(project.endpoints).toBeTruthy();
-      const endpoint: NeonEndpoint = project.endpoints![0];
+      const endpoint = project.endpoints![0];
       expect(endpoint.type).toEqual("read_write");
       expect(endpoint.host).toBeTruthy();
       expect(endpoint.branch_id).toBeTruthy();
@@ -67,14 +63,14 @@ describe("NeonProject Resource", () => {
       );
 
       expect(project.databases).toBeTruthy();
-      const database: NeonDatabase = project.databases![0];
+      const database = project.databases![0];
       expect(database.name).toBeTruthy();
       expect(database.id).toBeTruthy();
       expect(database.branch_id).toBeTruthy();
       expect(database.owner_name).toBeTruthy();
 
       expect(project.roles).toBeTruthy();
-      const role: NeonRole = project.roles![0];
+      const role = project.roles![0];
       expect(role.name).toBeTruthy();
       expect(role.branch_id).toBeTruthy();
 
@@ -82,11 +78,13 @@ describe("NeonProject Resource", () => {
       expect((project as any).operations).toBeUndefined();
 
       // Verify project was created by querying the API directly
-      const getResponse = await api.get(`/projects/${project.id}`);
-      expect(getResponse.status).toEqual(200);
+      const { data } = await api.getProject({
+        path: {
+          project_id: project.id,
+        },
+      });
 
-      const responseData = await getResponse.json();
-      expect(responseData.project.name).toEqual(projectName);
+      expect(data.project.name).toEqual(projectName);
 
       // Check if the branch is in ready state, confirming operations were waited for
       expect(project.branch!.current_state).toEqual("ready");
@@ -99,29 +97,32 @@ describe("NeonProject Resource", () => {
       project = await NeonProject(testId, {
         name: updatedName,
         region_id: "aws-us-east-1",
-        pg_version: 15,
-        existing_project_id: project.id,
+        pg_version: 16,
       });
 
       expect(project.id).toBeTruthy();
       expect(project.name).toEqual(updatedName);
 
       // Verify project was updated
-      const getUpdatedResponse = await api.get(`/projects/${project.id}`);
-      const updatedData = await getUpdatedResponse.json();
+      const { data: updatedData } = await api.getProject({
+        path: {
+          project_id: project.id,
+        },
+      });
       expect(updatedData.project.name).toEqual(updatedName);
-    } catch (err) {
-      // log the error or else it's silently swallowed by destroy errors
-      console.log(err);
-      throw err;
     } finally {
       // Always clean up, even if test assertions fail
       await destroy(scope);
 
       // Verify project was deleted
       if (project?.id) {
-        const getDeletedResponse = await api.get(`/projects/${project.id}`);
-        expect(getDeletedResponse.status).toEqual(404);
+        const { response } = await api.getProject({
+          path: {
+            project_id: project.id,
+          },
+          throwOnError: false,
+        });
+        expect(response.status).toEqual(404);
       }
     }
   });

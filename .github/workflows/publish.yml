@@ -1,4 +1,4 @@
-name: Publish
+name: Publish Website
 
 on:
   push:
@@ -19,45 +19,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+      - name: Cache Astro resources
+        uses: actions/cache@v4
         with:
-          bun-version: latest
+          path: |
+            alchemy-web/.astro
+          key: ${{ runner.os }}-astro-cache
 
-      - name: Install dependencies
-        run: |
-          bun install
-          # tanstack start doesn't deploy when packages are hoisted ...
-          cd examples/cloudflare-tanstack-start
-          bun install
-          cd ../..
-
-      - name: Check Types
-        run: bun run check
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Setup Alchemy Environment
+        uses: ./.github/actions/setup-alchemy
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-west-2
 
-      - name: Publsh docs
-        run: bun run deploy:website
+      - name: Install Playwright Browsers
+        run: bunx playwright install --with-deps chromium
+
+      - name: Get Astro version
+        id: astro-version
+        run: echo "version=$(bun info astro version)" >> $GITHUB_OUTPUT
+
+      - name: Cache Astro cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            alchemy-web/node_modules/.astro
+            alchemy-web/.astro
+          key: astro-cache-${{ steps.astro-version.outputs.version }}
+
+      - name: Check Types and Lint
+        run: | 
+          bun run build
+          bun run check
+
+      - name: Deploy Website
+        id: deploy
+        run: |
+          bun run build
+          bun install # to install the built `alchemy` CLI
+          bun deploy:website
         env:
-          CI: true
+          ALCHEMY_PASSWORD: ${{ env.ALCHEMY_PASSWORD }}
           ALCHEMY_STATE_STORE: cloudflare
+          ALCHEMY_STATE_TOKEN: ${{ env.ALCHEMY_STATE_TOKEN }}
           AWS_REGION: us-west-2
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
-          CLOUDFLARE_BUCKET_NAME: ${{ secrets.CLOUDFLARE_BUCKET_NAME }}
-          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          SECRET_PASSPHRASE: ${{ secrets.SECRET_PASSPHRASE }}
-          UPSTASH_API_KEY: ${{ secrets.UPSTASH_API_KEY }}
-          UPSTASH_EMAIL: sam@alchemy.run
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ env.CLOUDFLARE_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ env.CLOUDFLARE_EMAIL }}
+          GENERATE_OG_IMAGES: true
+          STAGE: prod

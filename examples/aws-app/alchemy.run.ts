@@ -1,33 +1,23 @@
 import alchemy from "alchemy";
 import { Function, Queue, Role, Table } from "alchemy/aws";
-import { R2RestStateStore } from "alchemy/cloudflare";
 import { Bundle } from "alchemy/esbuild";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const app = await alchemy("aws-app", {
-  // decide the mode/stage however you want
-  phase: process.argv[2] === "destroy" ? "destroy" : "up",
-  stage: process.argv[3],
-  quiet: process.argv.includes("--quiet"),
-  stateStore:
-    process.env.ALCHEMY_STATE_STORE === "cloudflare"
-      ? (scope) => new R2RestStateStore(scope)
-      : undefined,
-});
+const app = await alchemy("aws-app");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const [queue, table, role] = await Promise.all([
-  Queue("alchemy-items-queue", {
-    queueName: "alchemy-items-queue",
+const [_queue, table, role] = await Promise.all([
+  Queue("queue", {
+    queueName: `${app.name}-${app.stage}-queue`,
     visibilityTimeout: 30,
     messageRetentionPeriod: 345600, // 4 days
   }),
 
   // Create DynamoDB table
-  Table("alchemy-items-table", {
-    tableName: "alchemy-items",
+  Table("table", {
+    tableName: `${app.name}-${app.stage}-table`,
     partitionKey: {
       name: "id",
       type: "S",
@@ -35,8 +25,8 @@ const [queue, table, role] = await Promise.all([
   }),
 
   // Create Lambda execution role with DynamoDB access
-  Role("alchemy-api-role", {
-    roleName: "alchemy-api-lambda-role",
+  Role("role", {
+    roleName: `${app.name}-${app.stage}-lambda-role`,
     assumeRolePolicy: {
       Version: "2012-10-17",
       Statement: [
@@ -65,8 +55,8 @@ const bundle = await Bundle("api-bundle", {
   external: ["@aws-sdk/*"],
 });
 
-const api = await Function("api", {
-  functionName: "alchemy-items-api",
+const _api = await Function("api", {
+  functionName: `${app.name}-${app.stage}-api`,
   bundle,
   roleArn: role.arn,
   handler: "index.handler",

@@ -1,21 +1,33 @@
-import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { alchemy } from "../../src/alchemy.js";
-import { createCloudflareApi } from "../../src/cloudflare/api.js";
-import { Assets } from "../../src/cloudflare/assets.js";
-import { Self } from "../../src/cloudflare/bindings.js";
-import { R2Bucket } from "../../src/cloudflare/bucket.js";
-import { D1Database } from "../../src/cloudflare/d1-database.js";
-import { DurableObjectNamespace } from "../../src/cloudflare/durable-object-namespace.js";
-import { KVNamespace } from "../../src/cloudflare/kv-namespace.js";
-import { Queue } from "../../src/cloudflare/queue.js";
-import { Worker } from "../../src/cloudflare/worker.js";
-import { Workflow } from "../../src/cloudflare/workflow.js";
-import { destroy } from "../../src/destroy.js";
-import { BRANCH_PREFIX } from "../util.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { AnalyticsEngineDataset } from "../../src/cloudflare/analytics-engine.ts";
+import { createCloudflareApi } from "../../src/cloudflare/api.ts";
+import { Assets } from "../../src/cloudflare/assets.ts";
+import { Self } from "../../src/cloudflare/bindings.ts";
+import { DurableObjectNamespace } from "../../src/cloudflare/durable-object-namespace.ts";
+import { KVNamespace } from "../../src/cloudflare/kv-namespace.ts";
+import type { SingleStepMigration } from "../../src/cloudflare/worker-migration.ts";
+import { WorkerRef } from "../../src/cloudflare/worker-ref.ts";
+import { deleteWorker, Worker } from "../../src/cloudflare/worker.ts";
+import { destroy } from "../../src/destroy.ts";
+import {
+  fetchAndExpectOK,
+  fetchAndExpectStatus,
+} from "../../src/util/safe-fetch.ts";
+import { BRANCH_PREFIX, waitFor } from "../util.ts";
+import { fetchAndExpect } from "./fetch-utils.ts";
+import { assertWorkerDoesNotExist } from "./test-helpers.ts";
 
-import "../../src/test/bun.js";
+import { Container } from "../../src/cloudflare/container.ts";
+import { listWorkersInNamespace } from "../../src/cloudflare/dispatch-namespace.ts";
+import { DispatchNamespace } from "../../src/cloudflare/index.ts";
+import "../../src/test/vitest.ts";
+
+const ENABLE_WFP_TESTS = process.env.CLOUDFLARE_ACCOUNT_ENABLE_WFP !== "false";
+const ENABLE_PAID_TESTS =
+  process.env.CLOUDFLARE_ACCOUNT_ENABLE_PAID !== "false";
 
 const test = alchemy.test(import.meta, {
   prefix: BRANCH_PREFIX,
@@ -24,274 +36,21 @@ const test = alchemy.test(import.meta, {
 // Create a Cloudflare API client for verification
 const api = await createCloudflareApi();
 
-// Helper function to check if a worker exists
-async function assertWorkerDoesNotExist(workerName: string) {
-  try {
-    const response = await api.get(
-      `/accounts/${api.accountId}/workers/scripts/${workerName}`,
-    );
-    expect(response.status).toEqual(404);
-  } catch (error) {
-    // 404 is expected, so we can ignore it
-    return;
-  }
-}
-
 describe("Worker Resource", () => {
-  // Sample worker script (CJS style)
-  const workerScript = `
-    addEventListener('fetch', event => {
-      event.respondWith(new Response('Hello world!', { status: 200 }));
-    });
-  `;
-
-  // Sample ESM worker script
-  const esmWorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        return new Response('Hello ESM world!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with a Durable Object
-  const durableObjectWorkerScript = `
-    export class Counter {
-      constructor(state, env) {
-        this.state = state;
-        this.env = env;
-        this.counter = 0;
-      }
-
-      async fetch(request) {
-        this.counter++;
-        return new Response('Counter: ' + this.counter, { status: 200 });
-      }
-    }
-
-    export default {
-      async fetch(request, env, ctx) {
-        // Use the DO binding if needed
-        if (request.url.includes('/counter')) {
-          const id = env.COUNTER.idFromName('default');
-          const stub = env.COUNTER.get(id);
-          return stub.fetch(request);
-        }
-
-        return new Response('Hello with Durable Object!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with KV Namespace
-  const kvWorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        // Use the KV binding
-        if (request.url.includes('/kv')) {
-          const value = await env.TEST_KV.get('testKey');
-          return new Response('KV Value: ' + (value || 'not found'), { status: 200 });
-        }
-
-        return new Response('Hello with KV Namespace!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with R2 bucket
-  const r2WorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        // Use the R2 binding
-        if (request.url.includes('/r2-info')) {
-          // Just confirm we have access to the binding
-          return new Response(JSON.stringify({
-            hasR2: !!env.STORAGE,
-            bucketName: env.STORAGE.name || 'unknown'
-          }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
-
-        return new Response('Hello with R2 Bucket!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with multiple bindings
-  const multiBindingsWorkerScript = `
-    export class Counter {
-      constructor(state, env) {
-        this.state = state;
-        this.env = env;
-        this.counter = 0;
-      }
-
-      async fetch(request) {
-        this.counter++;
-        return new Response('Counter: ' + this.counter, { status: 200 });
-      }
-    }
-
-    export default {
-      async fetch(request, env, ctx) {
-        // Path-based routing to demonstrate different bindings
-        const url = new URL(request.url);
-
-        if (url.pathname.includes('/counter')) {
-          const id = env.COUNTER.idFromName('default');
-          const stub = env.COUNTER.get(id);
-          return stub.fetch(request);
-        }
-
-        if (url.pathname.includes('/kv')) {
-          const value = await env.TEST_KV.get('testKey');
-          return new Response('KV Value: ' + (value || 'not found'), { status: 200 });
-        }
-
-        if (url.pathname.includes('/secret')) {
-          return new Response('Secret: ' + env.API_KEY, { status: 200 });
-        }
-
-        return new Response('Hello worker with multiple bindings!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with environment variables
-  const envVarsWorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        const url = new URL(request.url);
-
-        // Return the value of the requested environment variable
-        if (url.pathname.startsWith('/env/')) {
-          const varName = url.pathname.split('/env/')[1];
-          const value = env[varName];
-          return new Response(value || 'undefined', {
-            status: 200,
-            headers: { 'Content-Type': 'text/plain' }
-          });
-        }
-
-        // Return all environment variables
-        if (url.pathname === '/env') {
-          const envVars = Object.entries(env)
-            .filter(([key]) => key !== 'COUNTER' && !key.includes('Durable')) // Filter out bindings
-            .map(([key, value]) => \`\${key}: \${value}\`)
-            .join('\\n');
-
-          return new Response(envVars, {
-            status: 200,
-            headers: { 'Content-Type': 'text/plain' }
-          });
-        }
-
-        return new Response('Hello with environment variables!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with original Counter class
-  const doMigrationWorkerScriptV1 = `
-    export class Counter {
-      constructor(state, env) {
-        this.state = state;
-        this.env = env;
-        this.counter = 0;
-      }
-
-      async fetch(request) {
-        this.counter++;
-        return new Response('Counter V1: ' + this.counter, { status: 200 });
-      }
-    }
-
-    export default {
-      async fetch(request, env, ctx) {
-        if (request.url.includes('/counter')) {
-          const id = env.COUNTER.idFromName('default');
-          const stub = env.COUNTER.get(id);
-          return stub.fetch(request);
-        }
-        return new Response('Hello with Counter V1!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample ESM worker script with renamed CounterV2 class
-  const doMigrationWorkerScriptV2 = `
-    export class CounterV2 {
-      constructor(state, env) {
-        this.state = state;
-        this.env = env;
-        this.counter = 0;
-      }
-
-      async fetch(request) {
-        this.counter++;
-        return new Response('Counter V2: ' + this.counter, { status: 200 });
-      }
-    }
-
-    export default {
-      async fetch(request, env, ctx) {
-        if (request.url.includes('/counter')) {
-          const id = env.COUNTER.idFromName('default');
-          const stub = env.COUNTER.get(id);
-          return stub.fetch(request);
-        }
-        return new Response('Hello with Counter V2!', { status: 200 });
-      }
-    };
-  `;
-
-  // Sample worker script with a scheduled handler
-  const cronWorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        return new Response('Worker with cron is running!', { status: 200 });
-      },
-      async scheduled(event, env, ctx) {
-        // Log the scheduled event details
-        console.log('Scheduled event received:', event.scheduledTime, event.cron);
-        // In a real worker, you would perform tasks here
-      },
-    };
-  `;
-
-  // Sample worker script with scheduled handler and KV namespace
-  const cronKvWorkerScript = `
-    export default {
-      async fetch(request, env, ctx) {
-        // Use the KV binding
-        if (request.url.includes('/last-run')) {
-          const value = await env.CRON_STATS.get('last_run');
-          return new Response('Last scheduled run: ' + (value || 'never'), { status: 200 });
-        }
-        return new Response('Worker with cron and KV is running!', { status: 200 });
-      },
-      async scheduled(event, env, ctx) {
-        // Log event to KV
-        await env.CRON_STATS.put('last_run', new Date().toISOString());
-        await env.CRON_STATS.put(\`run_\${Date.now()}\`, JSON.stringify({
-          cron: event.cron,
-          scheduledTime: event.scheduledTime
-        }));
-      },
-    };
-  `;
-
   test("create, update, and delete worker (CJS format)", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-cjs-1`;
 
-    let worker: Worker | undefined = undefined;
+    let worker: Worker | undefined;
     try {
       // Create a worker with an explicit name
       worker = await Worker(workerName, {
         name: workerName,
-        script: workerScript,
+        adopt: true,
+        script: `
+          addEventListener('fetch', event => {
+            event.respondWith(new Response('Hello world!', { status: 200 }));
+          });
+        `,
         format: "cjs",
       });
 
@@ -309,6 +68,7 @@ describe("Worker Resource", () => {
 
       worker = await Worker(workerName, {
         name: workerName,
+        adopt: true,
         script: updatedScript,
         format: "cjs",
       });
@@ -316,19 +76,26 @@ describe("Worker Resource", () => {
       expect(worker.id).toEqual(worker.id);
     } finally {
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
 
   test("create, update, and delete worker (ESM format)", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-esm-1`;
 
-    let worker: Worker | undefined = undefined;
+    let worker: Worker | undefined;
     try {
       // Create a worker with ESM format
       worker = await Worker(workerName, {
         name: workerName,
-        script: esmWorkerScript,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello ESM world!', { status: 200 });
+            }
+          };
+        `,
         format: "esm", // Explicitly using ESM
       });
 
@@ -348,6 +115,7 @@ describe("Worker Resource", () => {
 
       worker = await Worker(workerName, {
         name: workerName,
+        adopt: true,
         script: updatedEsmScript,
         format: "esm",
       });
@@ -355,19 +123,26 @@ describe("Worker Resource", () => {
       expect(worker.id).toEqual(worker.id);
     } finally {
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
 
   test("convert between ESM and CJS formats", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-format-conversion-convert-1`;
 
-    let worker: Worker | undefined = undefined;
+    let worker: Worker | undefined;
     try {
       // First create with ESM format
       worker = await Worker(workerName, {
         name: workerName,
-        script: esmWorkerScript,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello ESM world!', { status: 200 });
+            }
+          };
+        `,
         format: "esm",
       });
 
@@ -376,7 +151,12 @@ describe("Worker Resource", () => {
       // Update to CJS format
       worker = await Worker(workerName, {
         name: workerName,
-        script: workerScript,
+        adopt: true,
+        script: `
+          addEventListener('fetch', event => {
+            event.respondWith(new Response('Hello world!', { status: 200 }));
+          });
+        `,
         format: "cjs",
       });
       expect(worker.format).toEqual("cjs");
@@ -384,14 +164,20 @@ describe("Worker Resource", () => {
       // Update back to ESM format
       worker = await Worker(workerName, {
         name: workerName,
-        script: esmWorkerScript,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello ESM world!', { status: 200 });
+            }
+          };
+        `,
         format: "esm",
       });
 
       expect(worker.format).toEqual("esm");
     } finally {
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
 
@@ -402,14 +188,22 @@ describe("Worker Resource", () => {
       // First, create a worker successfully
       await Worker(workerName, {
         name: workerName,
-        script: workerScript,
+        script: `
+          addEventListener('fetch', event => {
+            event.respondWith(new Response('Hello world!', { status: 200 }));
+          });
+        `,
         format: "cjs",
       });
 
       // Try to create another worker with the same name, which should fail
       const duplicateWorker = Worker(`${workerName}-dup`, {
         name: workerName, // Same name as firstWorker
-        script: workerScript,
+        script: `
+          addEventListener('fetch', event => {
+            event.respondWith(new Response('Hello world!', { status: 200 }));
+          });
+        `,
         format: "cjs",
       });
       await expect(duplicateWorker).rejects.toThrow(
@@ -420,25 +214,129 @@ describe("Worker Resource", () => {
     }
   });
 
-  test("create and delete worker with Durable Object binding", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-do-binding-do-1`;
+  test.skipIf(!ENABLE_PAID_TESTS)(
+    "fails when creating worker with duplicate binding IDs",
+    async (scope) => {
+      const workerName = `${BRANCH_PREFIX}-test-worker-duplicate-binding-ids`;
 
-    let worker: Worker | undefined = undefined;
-    try {
-      // First create the worker without the DO binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: durableObjectWorkerScript,
-        format: "esm",
-        // No bindings yet
-      });
+      try {
+        // Test 1: Duplicate DurableObjectNamespace IDs
+        const namespace1 = DurableObjectNamespace("duplicate-id", {
+          className: "Counter1",
+          scriptName: workerName,
+        });
 
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeEmpty();
+        const namespace2 = DurableObjectNamespace("duplicate-id", {
+          className: "Counter2",
+          scriptName: workerName,
+        });
+
+        // Try to create a worker with duplicate binding IDs
+        const duplicateBindingsWorker = Worker(workerName, {
+          name: workerName,
+          script: `
+          export class Counter1 {}
+          export class Counter2 {}
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Should not work!', { status: 200 });
+            }
+          };
+        `,
+          format: "esm",
+          bindings: {
+            NAMESPACE1: namespace1,
+            NAMESPACE2: namespace2, // Same ID as namespace1
+          },
+        });
+
+        await expect(duplicateBindingsWorker).rejects.toThrow(
+          "Duplicate binding ID 'duplicate-id' found for bindings 'NAMESPACE1' and 'NAMESPACE2'. Container and DurableObjectNamespace bindings must have unique IDs.",
+        );
+
+        const container = await Container("duplicate-id", {
+          className: "ContainerClass",
+          scriptName: workerName,
+          build: {
+            dockerfile: "Dockerfile",
+            context: path.join(import.meta.dirname, "container"),
+          },
+        });
+
+        const mixedDuplicateWorker = Worker(workerName, {
+          name: workerName,
+          script: `
+          export class Counter1 {}
+          export class ContainerClass {}
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Should not work!', { status: 200 });
+            }
+          };
+        `,
+          format: "esm",
+          bindings: {
+            NAMESPACE1: namespace1,
+            CONTAINER: container, // Same ID as namespace1
+          },
+        });
+
+        await expect(mixedDuplicateWorker).rejects.toThrow(
+          "Duplicate binding ID 'duplicate-id' found for bindings 'NAMESPACE1' and 'CONTAINER'. Container and DurableObjectNamespace bindings must have unique IDs.",
+        );
+      } finally {
+        await destroy(scope);
+      }
+    },
+  );
+
+  test.skipIf(!ENABLE_PAID_TESTS)(
+    "create and delete worker with multiple bindings",
+    async (scope) => {
+      const workerName = `${BRANCH_PREFIX}-test-worker-multi-bindings-multi-1`;
+
+      // Sample ESM worker script with multiple bindings
+      const multiBindingsWorkerScript = `
+  export class Counter {
+    constructor(state, env) {
+      this.state = state;
+      this.env = env;
+      this.counter = 0;
+    }
+
+    async fetch(request) {
+      this.counter++;
+      return new Response('Counter: ' + this.counter, { status: 200 });
+    }
+  }
+
+  export default {
+    async fetch(request, env, ctx) {
+      // Path-based routing to demonstrate different bindings
+      const url = new URL(request.url);
+
+      if (url.pathname.includes('/counter')) {
+        const id = env.COUNTER.idFromName('default');
+        const stub = env.COUNTER.get(id);
+        return stub.fetch(request);
+      }
+
+      if (url.pathname.includes('/kv')) {
+        const value = await env.TEST_KV.get('testKey');
+        return new Response('KV Value: ' + (value || 'not found'), { status: 200 });
+      }
+
+      if (url.pathname.includes('/secret')) {
+        return new Response('Secret: ' + env.API_KEY, { status: 200 });
+      }
+
+      return new Response('Hello worker with multiple bindings!', { status: 200 });
+    }
+  };
+`;
 
       // Create a Durable Object namespace
-      const counterNamespace = new DurableObjectNamespace(
+      const counterNamespace = DurableObjectNamespace(
         "test-counter-namespace",
         {
           className: "Counter",
@@ -446,34 +344,10 @@ describe("Worker Resource", () => {
         },
       );
 
-      // Update the worker with the DO binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: durableObjectWorkerScript,
-        format: "esm",
-        bindings: {
-          COUNTER: counterNamespace,
-        },
-      });
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
-
-  test("create and delete worker with KV Namespace binding", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-kv-binding-kv-1`;
-
-    let worker: Worker | undefined = undefined;
-    let testKv: KVNamespace | undefined = undefined;
-    try {
-      // Create a KV namespace with initial values
-      testKv = await KVNamespace("test-kv-namespace", {
-        title: `${BRANCH_PREFIX} Test KV Namespace 2`,
+      // Create a KV namespace
+      const testKv = await KVNamespace("test-kv-namespace", {
+        title: `${BRANCH_PREFIX} Test KV Namespace 1`,
+        adopt: true,
         values: [
           {
             key: "testKey",
@@ -482,88 +356,57 @@ describe("Worker Resource", () => {
         ],
       });
 
-      // Create a worker with the KV Namespace binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: kvWorkerScript,
-        format: "esm",
-        bindings: {
-          TEST_KV: testKv,
-        },
-      });
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
+      let worker: Worker | undefined;
 
-  test("create and delete worker with multiple bindings", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-multi-bindings-multi-1`;
+      try {
+        // First create the worker without bindings
+        worker = await Worker(workerName, {
+          name: workerName,
+          script: multiBindingsWorkerScript,
+          format: "esm",
+          adopt: true,
+        });
 
-    // Create a Durable Object namespace
-    const counterNamespace = new DurableObjectNamespace(
-      "test-counter-namespace",
-      {
-        className: "Counter",
-        scriptName: workerName,
-      },
-    );
+        expect(worker.id).toBeTruthy();
+        expect(worker.name).toEqual(workerName);
 
-    // Create a KV namespace
-    const testKv = await KVNamespace("test-kv-namespace", {
-      title: `${BRANCH_PREFIX} Test KV Namespace 1`,
-      values: [
-        {
-          key: "testKey",
-          value: "initial-value",
-        },
-      ],
-    });
+        // Update the worker with all bindings
+        worker = await Worker(workerName, {
+          name: workerName,
+          script: multiBindingsWorkerScript,
+          format: "esm",
+          bindings: {
+            COUNTER: counterNamespace,
+            TEST_KV: testKv,
+            API_KEY: "test-api-key-value",
+          },
+          adopt: true,
+        });
 
-    let worker: Worker | undefined = undefined;
-
-    try {
-      // First create the worker without bindings
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: multiBindingsWorkerScript,
-        format: "esm",
-      });
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-
-      // Update the worker with all bindings
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: multiBindingsWorkerScript,
-        format: "esm",
-        bindings: {
-          COUNTER: counterNamespace,
-          TEST_KV: testKv,
-          API_KEY: "test-api-key-value",
-        },
-      });
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
+        expect(worker.id).toBeTruthy();
+        expect(worker.name).toEqual(workerName);
+        expect(worker.bindings).toBeDefined();
+      } finally {
+        await destroy(scope);
+        await assertWorkerDoesNotExist(api, workerName);
+      }
+    },
+  );
 
   // Add a new test for environment variables
   test("create and test worker with environment variables", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-env-vars-env-1`;
-    let worker: Worker | undefined = undefined;
+    // Sample ESM worker script with environment variables
+    const envVarsWorkerScript = `
+      export default {
+        async fetch(request, env, ctx) {
+          return Response.json(env);
+        }
+      };
+    `;
     try {
       // Create a worker with environment variables
-      worker = await Worker(workerName, {
+      const worker1 = await Worker(workerName, {
         name: workerName,
         script: envVarsWorkerScript,
         format: "esm",
@@ -573,31 +416,32 @@ describe("Worker Resource", () => {
           APP_DEBUG: "true",
         },
         url: true, // Enable workers.dev URL to test the worker
+        adopt: true,
       });
 
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.env).toBeDefined();
-      expect(worker.env?.TEST_API_KEY).toEqual("test-api-key-123");
-      expect(worker.env?.NODE_ENV).toEqual("testing");
-      expect(worker.url).toBeTruthy();
+      expect(worker1.id).toBeTruthy();
+      expect(worker1.name).toEqual(workerName);
+      expect(worker1.env).toBeDefined();
+      expect(worker1.env?.TEST_API_KEY).toEqual("test-api-key-123");
+      expect(worker1.env?.NODE_ENV).toEqual("testing");
+      expect(worker1.env?.APP_DEBUG).toEqual("true");
+      expect(worker1.url).toBeTruthy();
 
-      if (worker.url) {
+      if (worker1.url) {
         // Test that the environment variables are accessible in the worker
-        const response = await fetch(`${worker.url}/env/TEST_API_KEY`);
-        expect(response.status).toEqual(200);
-        const text = await response.text();
-        expect(text).toEqual("test-api-key-123");
-
-        // Test another environment variable
-        const nodeEnvResponse = await fetch(`${worker.url}/env/NODE_ENV`);
-        expect(nodeEnvResponse.status).toEqual(200);
-        const nodeEnvText = await nodeEnvResponse.text();
-        expect(nodeEnvText).toEqual("testing");
+        const response = await fetchAndExpectOK(worker1.url);
+        const text = await response.json();
+        expect(text).toEqual({
+          TEST_API_KEY: "test-api-key-123",
+          NODE_ENV: "testing",
+          APP_DEBUG: "true",
+        });
+      } else {
+        throw new Error("Worker URL is undefined");
       }
 
       // Update the worker with different environment variables
-      worker = await Worker(workerName, {
+      const worker2 = await Worker(`${workerName}-2`, {
         name: workerName,
         script: envVarsWorkerScript,
         format: "esm",
@@ -607,215 +451,51 @@ describe("Worker Resource", () => {
           NEW_VAR: "new-value",
         },
         url: true,
+        adopt: true,
       });
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      expect(worker.id).toEqual(worker.id);
-      expect(worker.env?.TEST_API_KEY).toEqual("updated-key-456");
-      expect(worker.env?.NODE_ENV).toEqual("production");
-      expect(worker.env?.NEW_VAR).toEqual("new-value");
+      expect(worker2.id).toEqual(worker2.id);
+      expect(worker2.env?.TEST_API_KEY).toEqual("updated-key-456");
+      expect(worker2.env?.NODE_ENV).toEqual("production");
+      expect(worker2.env?.NEW_VAR).toEqual("new-value");
       // APP_DEBUG should no longer be present
-      expect(worker.env?.APP_DEBUG).toBeUndefined();
+      expect(worker2.env?.APP_DEBUG).toBeUndefined();
+      expect(worker2.url).toEqual(worker1.url);
 
-      // Test that the updated environment variables are accessible
-      const response = await fetch(`${worker.url}/env/TEST_API_KEY`);
-      expect(response.status).toEqual(200);
-      const text = await response.text();
-      expect(text).toEqual("updated-key-456");
+      if (worker2.url) {
+        // Poll for up to 10s to allow eventual consistency of env propagation
+        const expectedEnv = {
+          TEST_API_KEY: "updated-key-456",
+          NODE_ENV: "production",
+          NEW_VAR: "new-value",
+        } as const;
 
-      // Test new environment variable
-      const newVarResponse = await fetch(`${worker.url}/env/NEW_VAR`);
-      expect(newVarResponse.status).toEqual(200);
-      const newVarText = await newVarResponse.text();
-      expect(newVarText).toEqual("new-value");
+        const lastText: any = await waitFor(
+          async () => {
+            const response = await fetchAndExpectOK(worker2.url!);
+            return response.json();
+          },
+          (data: any) => JSON.stringify(data) === JSON.stringify(expectedEnv),
+          { timeoutMs: 10_000, intervalMs: 250 },
+        );
 
-      // Test that the removed environment variable is no longer accessible
-      const removedVarResponse = await fetch(`${worker.url}/env/APP_DEBUG`);
-      expect(removedVarResponse.status).toEqual(200);
-      const removedVarText = await removedVarResponse.text();
-      expect(removedVarText).toEqual("undefined");
+        expect(lastText).toEqual(expectedEnv);
+      } else {
+        throw new Error("Worker URL is undefined");
+      }
     } finally {
       await destroy(scope);
       // Verify the worker was deleted
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
-
-  test("migrate durable object by renaming class", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-do-migration-migrate-1`;
-    let worker: Worker | undefined = undefined;
-    try {
-      // First create the worker with the original Counter class
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: doMigrationWorkerScriptV1,
-        format: "esm",
-      });
-
-      // Apply to create the worker first
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-
-      // Create a stable DO namespace with the original Counter class
-      const counterNamespace = new DurableObjectNamespace(
-        "test-counter-namespace",
-        {
-          className: "Counter",
-          scriptName: workerName,
-        },
-      );
-
-      // Update worker with the original Counter binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: doMigrationWorkerScriptV1,
-        format: "esm",
-        bindings: {
-          COUNTER: counterNamespace,
-        },
-      });
-
-      expect(worker.bindings).toBeDefined();
-
-      // Now update the namespace to use CounterV2 class
-      const updatedNamespace = new DurableObjectNamespace(
-        "test-counter-namespace",
-        {
-          className: "CounterV2",
-          scriptName: workerName,
-        },
-      );
-
-      // Update worker with the migrated binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: doMigrationWorkerScriptV2,
-        format: "esm",
-        bindings: {
-          COUNTER: updatedNamespace,
-        },
-      });
-
-      expect(worker.bindings).toBeDefined();
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
-
-  test("add environment variables to worker with durable object", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-do-with-env-doenv-1`;
-
-    let worker: Worker | undefined = undefined;
-    try {
-      // First create a worker with a Durable Object but no env vars
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: durableObjectWorkerScript,
-        format: "esm",
-      });
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-
-      // Create a Durable Object namespace
-      const counterNamespace = new DurableObjectNamespace(
-        "test-counter-env-namespace",
-        {
-          className: "Counter",
-          scriptName: workerName,
-        },
-      );
-
-      // Update the worker with the DO binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: durableObjectWorkerScript,
-        format: "esm",
-        bindings: {
-          COUNTER: counterNamespace,
-        },
-      });
-
-      // Apply the worker with binding
-      expect(worker.bindings).toBeDefined();
-      expect(worker.env).toBeUndefined();
-
-      // Now update the worker by adding environment variables
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: durableObjectWorkerScript,
-        format: "esm",
-        bindings: {
-          COUNTER: counterNamespace,
-        },
-        env: {
-          API_SECRET: "test-secret-123",
-          DEBUG_MODE: "true",
-        },
-      });
-
-      expect(worker.bindings).toBeDefined();
-      expect(worker.env).toBeDefined();
-      expect(worker.env?.API_SECRET).toEqual("test-secret-123");
-      expect(worker.env?.DEBUG_MODE).toEqual("true");
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
-
-  test("create and delete worker with R2 bucket binding", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-r2-binding-r2-1`;
-
-    // Create a test R2 bucket
-    let testBucket: R2Bucket | undefined;
-
-    let worker: Worker<{ STORAGE: R2Bucket }> | undefined;
-
-    try {
-      testBucket = await R2Bucket("test-bucket", {
-        name: `${BRANCH_PREFIX.toLowerCase()}-test-r2-bucket`,
-        allowPublicAccess: false,
-      });
-
-      // Create a worker with the R2 bucket binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: r2WorkerScript,
-        format: "esm",
-        url: true, // Enable workers.dev URL to test the worker
-        bindings: {
-          STORAGE: testBucket,
-        },
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-      expect(worker.bindings!.STORAGE).toBeDefined();
-
-      // Test that the R2 binding is accessible in the worker
-      const response = await fetch(`${worker.url}/r2-info`);
-      expect(response.status).toEqual(200);
-      const data = (await response.json()) as {
-        hasR2: boolean;
-        bucketName: string;
-      };
-      expect(data.hasR2).toEqual(true);
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
 
   // Test for static assets
   test("create and test worker with static assets", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-assets`;
-    let tempDir: string | undefined = undefined;
+    let tempDir: string | undefined;
 
     try {
       // Create a temporary directory to store test assets
@@ -844,7 +524,7 @@ describe("Worker Resource", () => {
       await fs.writeFile(path.join(subDir, "config.json"), jsonContent);
 
       // Create assets resource
-      const assets = await Assets("static-assets", {
+      const assets = await Assets({
         path: tempDir,
       });
 
@@ -874,6 +554,7 @@ describe("Worker Resource", () => {
         bindings: {
           ASSETS: assets,
         },
+        adopt: true,
       });
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -884,15 +565,7 @@ describe("Worker Resource", () => {
       expect(worker.bindings?.ASSETS).toBeTruthy();
 
       async function get(url: string) {
-        const response = await fetch(url);
-        if (response.status !== 200) {
-          console.log(
-            response.status,
-            response.statusText,
-            await response.text(),
-          );
-        }
-        expect(response.status).toEqual(200);
+        const response = await fetchAndExpectOK(url);
         const text = await response.text();
         return text;
       }
@@ -924,14 +597,14 @@ describe("Worker Resource", () => {
 
       await destroy(scope);
       // Verify the worker was deleted
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
 
   // Test for worker with assets configuration
   test("create worker with assets configuration options", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-assets-config`;
-    let tempDir: string | undefined = undefined;
+    let tempDir: string | undefined;
 
     try {
       // Create a temporary directory to store test assets
@@ -977,7 +650,7 @@ describe("Worker Resource", () => {
       ]);
 
       // Create assets resource
-      const assets = await Assets("assets-with-config", {
+      const assets = await Assets({
         path: tempDir,
       });
 
@@ -1049,8 +722,6 @@ describe("Worker Resource", () => {
         },
       });
 
-      console.log(worker.url);
-
       expect(worker.id).toBeTruthy();
       expect(worker.name).toEqual(workerName);
       expect(worker.url).toBeTruthy();
@@ -1067,8 +738,7 @@ describe("Worker Resource", () => {
       expect(worker.assets?.run_worker_first).toEqual(false);
 
       // Test that the static assets are accessible
-      const indexResponse = await fetch(`${worker.url}/index.html`);
-      expect(indexResponse.status).toEqual(200);
+      const indexResponse = await fetchAndExpectOK(`${worker.url}/index.html`);
       expect(await indexResponse.text()).toContain("Assets Config Test");
 
       // Test HTML headers
@@ -1079,8 +749,7 @@ describe("Worker Resource", () => {
       );
 
       // Test that custom headers are applied
-      const cssResponse = await fetch(`${worker.url}/styles.css`);
-      expect(cssResponse.status).toEqual(200);
+      const cssResponse = await fetchAndExpectOK(`${worker.url}/styles.css`);
       expect(cssResponse.headers.get("Cache-Control")).toEqual(
         "public, max-age=86400",
       );
@@ -1088,27 +757,35 @@ describe("Worker Resource", () => {
 
       // Test auto-trailing-slash behavior
       // With auto-trailing-slash, /index should redirect to /index.html
-      const indexWithoutExtension = await fetch(`${worker.url}/index`, {
-        redirect: "manual",
-      });
-      expect(indexWithoutExtension.status).toEqual(307);
+      await fetchAndExpectStatus(
+        `${worker.url}/index`,
+        {
+          redirect: "manual",
+        },
+        307,
+      );
 
       // Test redirects
-      const oldPathResponse = await fetch(`${worker.url}/old-path`, {
-        redirect: "manual",
-      });
-      expect(oldPathResponse.status).toEqual(301);
+      await fetchAndExpectStatus(
+        `${worker.url}/old-path`,
+        {
+          redirect: "manual",
+        },
+        301,
+      );
 
       // Test wildcard redirects
-      const legacyResponse = await fetch(`${worker.url}/legacy/something`, {
-        redirect: "manual",
-      });
-      expect(legacyResponse.status).toEqual(302);
+      await fetchAndExpectStatus(
+        `${worker.url}/legacy/something`,
+        {
+          redirect: "manual",
+        },
+        302,
+      );
 
       // Test the worker's API endpoint
-      const apiResponse = await fetch(`${worker.url}/api/status`);
-      expect(apiResponse.status).toEqual(200);
-      const apiData = await apiResponse.json();
+      const apiResponse = await fetchAndExpectOK(`${worker.url}/api/status`);
+      const apiData: any = await apiResponse.json();
       expect(apiData.status).toEqual("ok");
       expect(apiData.worker).toEqual(workerName);
     } finally {
@@ -1118,456 +795,16 @@ describe("Worker Resource", () => {
       }
 
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   });
-
-  // Test for binding a workflow to a worker
-  test("create and delete worker with workflow binding", async (scope) => {
-    const workerName = `${BRANCH_PREFIX}-test-worker-workflow`;
-
-    // Sample worker script with workflow handler - updated to match Cloudflare Workflows pattern
-    const workflowWorkerScript = `
-      // Workflow definition for email notifications
-      export class EmailNotifier {
-        constructor(state, env) {
-          this.state = state;
-          this.env = env;
-        }
-
-        async run(event, step) {
-          // Process order data from event payload
-          const orderDetails = await step.do('process-order', async () => {
-            console.log("Processing order", event.payload);
-            return {
-              success: true,
-              orderId: event.payload.orderId,
-              message: "Order processed successfully"
-            };
-          });
-
-          return orderDetails;
-        }
-      }
-
-      // Workflow definition for order processing
-      export class OrderProcessor {
-        constructor(state, env) {
-          this.state = state;
-          this.env = env;
-        }
-
-        async run(event, step) {
-          // Process shipping data
-          const shippingDetails = await step.do('process-shipping', async () => {
-            console.log("Processing shipping", event.payload);
-            return {
-              success: true,
-              shipmentId: event.payload.shipmentId,
-              message: "Shipment scheduled successfully"
-            };
-          });
-
-          return shippingDetails;
-        }
-      }
-
-      export default {
-        async fetch(request, env, ctx) {
-          const url = new URL(request.url);
-
-          // Add endpoints to trigger workflows for testing
-          if (url.pathname === '/trigger-email-workflow') {
-            try {
-              // Get workflow binding
-              const workflow = env.EMAIL_WORKFLOW;
-
-              if (!workflow) {
-                return new Response(JSON.stringify({ error: "No email workflow binding found" }), {
-                  status: 500,
-                  headers: { 'Content-Type': 'application/json' }
-                });
-              }
-
-              // Create a workflow instance with parameters
-              const params = { orderId: "test-123", amount: 99.99 };
-              const instance = await workflow.create(params);
-
-              return Response.json({
-                id: instance.id,
-                details: await instance.status(),
-                success: true,
-                orderId: params.orderId,
-                message: "Order processed successfully"
-              });
-            } catch (error) {
-              console.error("Error triggering email workflow:", error);
-              return new Response(JSON.stringify({ error: error.message || "Unknown error" }), {
-                status: 500,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            }
-          }
-
-          // Endpoint for the order workflow
-          if (url.pathname === '/trigger-order-workflow') {
-            try {
-              // Get workflow binding
-              const workflow = env.ORDER_WORKFLOW;
-
-              if (!workflow) {
-                return new Response(JSON.stringify({ error: "No order workflow binding found" }), {
-                  status: 500,
-                  headers: { 'Content-Type': 'application/json' }
-                });
-              }
-
-              // Create a workflow instance with parameters
-              const params = { shipmentId: "ship-456", carrier: "FastShip" };
-              const instance = await workflow.create(params);
-
-              return Response.json({
-                id: instance.id,
-                details: await instance.status(),
-                success: true,
-                shipmentId: params.shipmentId,
-                message: "Shipment scheduled successfully"
-              });
-            } catch (error) {
-              console.error("Error triggering order workflow:", error);
-              return new Response(JSON.stringify({ error: error.message || "Unknown error" }), {
-                status: 500,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            }
-          }
-
-          return new Response('Worker with workflow bindings!', { status: 200 });
-        }
-      };
-    `;
-
-    let worker: Worker | undefined = undefined;
-    try {
-      // Create a workflow instance
-      const emailWorkflow = new Workflow("email-notifier", {
-        className: "EmailNotifier",
-        workflowName: "email-notification-workflow",
-      });
-
-      // Create a worker with the workflow binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: workflowWorkerScript,
-        format: "esm",
-        bindings: {
-          EMAIL_WORKFLOW: emailWorkflow,
-        },
-        url: true, // Enable workers.dev URL to test the workflow
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-      expect(worker.url).toBeTruthy();
-
-      // Test triggering the first workflow
-      const response = await fetch(`${worker.url!}/trigger-email-workflow`);
-      const result = await response.json();
-      console.log("Email workflow response:", result);
-
-      expect(response.status).toEqual(200);
-      expect(result.success).toEqual(true);
-      expect(result.orderId).toEqual("test-123");
-      expect(result.message).toEqual("Order processed successfully");
-      // Verify the instance ID is not empty
-      expect(result.id).toBeTruthy();
-      expect(typeof result.id).toBe("string");
-      expect(result.id.length).toBeGreaterThan(0);
-      // Verify the details contain valid status
-      expect(result.details).toBeDefined();
-      expect(result.details.status).toBeTruthy();
-
-      // Create a new workflow binding and update the worker
-      const orderWorkflow = new Workflow("order-processor", {
-        className: "OrderProcessor",
-        workflowName: "order-processing-workflow",
-      });
-
-      // Update the worker with multiple workflow bindings
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: workflowWorkerScript,
-        format: "esm",
-        bindings: {
-          EMAIL_WORKFLOW: emailWorkflow,
-          ORDER_WORKFLOW: orderWorkflow,
-        },
-        url: true,
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      expect(worker.bindings).toBeDefined();
-      expect(Object.keys(worker.bindings || {})).toHaveLength(2);
-
-      // Test triggering the second workflow
-      const orderResponse = await fetch(
-        `${worker.url!}/trigger-order-workflow`,
-      );
-      const orderResult = await orderResponse.json();
-      console.log("Order workflow response:", orderResult);
-
-      expect(orderResponse.status).toEqual(200);
-      expect(orderResult.success).toEqual(true);
-      expect(orderResult.shipmentId).toEqual("ship-456");
-      expect(orderResult.message).toEqual("Shipment scheduled successfully");
-      // Verify the instance ID is not empty
-      expect(orderResult.id).toBeTruthy();
-      expect(typeof orderResult.id).toBe("string");
-      expect(orderResult.id.length).toBeGreaterThan(0);
-      // Verify the details contain valid status
-      expect(orderResult.details).toBeDefined();
-      expect(orderResult.details.status).toBeTruthy();
-    } finally {
-      // Explicitly destroy resources since destroy: false is set
-      await destroy(scope);
-      // Verify the worker was deleted
-      await assertWorkerDoesNotExist(workerName);
-    }
-  });
-
-  test("create and test worker with D1 database binding", async (scope) => {
-    // Sample ESM worker script with D1 database functionality
-    const d1WorkerScript = `
-      export default {
-        async fetch(request, env, ctx) {
-          const url = new URL(request.url);
-
-          // Initialize the database with a table and data
-          if (url.pathname === '/init-db') {
-            try {
-              const db = env.DATABASE;
-
-              // Create a test table
-              await db.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)");
-
-              // Insert some test data
-              await db.exec("INSERT INTO users (name, email) VALUES ('Test User', 'test@example.com')");
-
-              return new Response('Database initialized successfully!', {
-                status: 200,
-                headers: { 'Content-Type': 'text/plain' }
-              });
-            } catch (error) {
-              return new Response('Error initializing database: ' + error.message, {
-                status: 500,
-                headers: { 'Content-Type': 'text/plain' }
-              });
-            }
-          }
-
-          // Query data from the database
-          if (url.pathname === '/query-db') {
-            try {
-              const db = env.DATABASE;
-
-              // Query the database
-              const { results } = await db.prepare("SELECT * FROM users").all();
-
-              return new Response(JSON.stringify({ success: true, data: results }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            } catch (error) {
-              return new Response(JSON.stringify({
-                success: false,
-                error: error.message
-              }), {
-                status: 500,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            }
-          }
-
-          return new Response('D1 Database Worker is running!', {
-            status: 200,
-            headers: { 'Content-Type': 'text/plain' }
-          });
-        }
-      };
-    `;
-
-    const workerName = `${BRANCH_PREFIX}-test-worker-d1`;
-
-    let worker: Worker<{ DATABASE: D1Database }> | undefined = undefined;
-    let db: D1Database | undefined = undefined;
-
-    try {
-      // Create a D1 database
-      db = await D1Database(`${BRANCH_PREFIX}-test-db`, {
-        name: `${BRANCH_PREFIX}-test-db`,
-        primaryLocationHint: "wnam", // West North America
-      });
-
-      expect(db.id).toBeTruthy();
-      expect(db.name).toEqual(`${BRANCH_PREFIX}-test-db`);
-
-      // Create a worker with the D1 database binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: d1WorkerScript,
-        format: "esm",
-        url: true, // Enable workers.dev URL to test the worker
-        bindings: {
-          DATABASE: db,
-        },
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-      expect(worker.bindings!.DATABASE).toBeDefined();
-      expect(worker.bindings!.DATABASE.id).toEqual(db.id);
-      expect(worker.url).toBeTruthy();
-
-      // Initialize the database with a table and data
-      const initResponse = await fetch(`${worker.url}/init-db`);
-      expect(initResponse.status).toEqual(200);
-      const initText = await initResponse.text();
-      expect(initText).toEqual("Database initialized successfully!");
-
-      // Query data from the database
-      const queryResponse = await fetch(`${worker.url}/query-db`);
-      expect(queryResponse.status).toEqual(200);
-      const queryData = await queryResponse.json();
-      expect(queryData.success).toEqual(true);
-      expect(queryData.data).toBeArray();
-      expect(queryData.data.length).toBeGreaterThan(0);
-      expect(queryData.data[0].name).toEqual("Test User");
-      expect(queryData.data[0].email).toEqual("test@example.com");
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  }, 120000); // Increased timeout for D1 database operations
-
-  test("create and test worker with Queue binding", async (scope) => {
-    // Sample ESM worker script with Queue functionality
-    const queueWorkerScript = `
-      export default {
-        async fetch(request, env, ctx) {
-          const url = new URL(request.url);
-
-          // Send a message to the queue
-          if (url.pathname === '/send-message') {
-            try {
-              const body = await request.json();
-              const messageId = await env.MESSAGE_QUEUE.send(body);
-
-              return new Response(JSON.stringify({
-                success: true,
-                messageId,
-                message: 'Message sent successfully'
-              }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            } catch (error) {
-              return new Response(JSON.stringify({
-                success: false,
-                error: error.message
-              }), {
-                status: 500,
-                headers: { 'Content-Type': 'application/json' }
-              });
-            }
-          }
-
-          return new Response('Queue Worker is running!', {
-            status: 200,
-            headers: { 'Content-Type': 'text/plain' }
-          });
-        }
-      };
-    `;
-
-    const workerName = `${BRANCH_PREFIX}-test-worker-queue`;
-    const queueName = `${BRANCH_PREFIX}-test-queue`;
-
-    let worker: Worker<{ MESSAGE_QUEUE: Queue }> | undefined = undefined;
-    let queue: Queue | undefined = undefined;
-
-    try {
-      // Create a Queue
-      queue = await Queue(queueName, {
-        name: queueName,
-        settings: {
-          deliveryDelay: 0, // No delay for testing
-          deliveryPaused: false,
-        },
-      });
-
-      expect(queue.id).toBeTruthy();
-      expect(queue.name).toEqual(queueName);
-      expect(queue.type).toEqual("queue");
-
-      // Create a worker with the Queue binding
-      worker = await Worker(workerName, {
-        name: workerName,
-        script: queueWorkerScript,
-        format: "esm",
-        url: true, // Enable workers.dev URL to test the worker
-        bindings: {
-          MESSAGE_QUEUE: queue,
-        },
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      expect(worker.id).toBeTruthy();
-      expect(worker.name).toEqual(workerName);
-      expect(worker.bindings).toBeDefined();
-      expect(worker.bindings!.MESSAGE_QUEUE).toBeDefined();
-      expect(worker.url).toBeTruthy();
-
-      if (worker.url) {
-        // Send a message to the queue
-        const testMessage = {
-          id: "msg-123",
-          content: "Test message content",
-          timestamp: Date.now(),
-        };
-
-        const sendResponse = await fetch(`${worker.url}/send-message`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(testMessage),
-        });
-
-        expect(sendResponse.status).toEqual(200);
-        const responseData = await sendResponse.json();
-        expect(responseData.success).toEqual(true);
-        expect(responseData.message).toEqual("Message sent successfully");
-      }
-    } finally {
-      await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
-    }
-  }, 120000); // Increased timeout for Queue operations
 
   test("create and test worker with Self binding", async (scope) => {
     // Sample ESM worker script with Self binding functionality
 
     const workerName = `${BRANCH_PREFIX}-test-worker-self`;
 
-    let worker: Worker | undefined = undefined;
+    let worker: Worker | undefined;
 
     try {
       // Create a worker with the Self binding
@@ -1636,19 +873,21 @@ describe("Worker Resource", () => {
       expect(worker.url).toBeTruthy();
 
       // Test the echo endpoint
-      const echoResponse = await fetch(`${worker.url}/echo/hello-world`);
-      expect(echoResponse.status).toEqual(200);
+      const echoResponse = await fetchAndExpectOK(
+        `${worker.url}/echo/hello-world`,
+      );
       const echoText = await echoResponse.text();
       expect(echoText).toEqual("Echo: hello-world");
 
       // Test the recursive endpoint with a count of 3
-      const recursiveResponse = await fetch(`${worker.url}/recursive/start/3`);
-      expect(recursiveResponse.status).toEqual(200);
+      const recursiveResponse = await fetchAndExpectOK(
+        `${worker.url}/recursive/start/3`,
+      );
       const recursiveText = await recursiveResponse.text();
       expect(recursiveText).toEqual("Final result: start-3-2-1");
     } finally {
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   }, 60000); // Increased timeout for Self binding operations
 
@@ -1705,15 +944,13 @@ describe("Worker Resource", () => {
       expect(worker.url).toBeTruthy();
 
       // Test that the worker is running correctly
-      const response = await fetch(worker.url!);
-      expect(response.status).toEqual(200);
+      const response = await fetchAndExpectOK(worker.url!);
       const text = await response.text();
       expect(text).toEqual("Hello from entrypoint file!");
 
       // Test the JSON endpoint
-      const jsonResponse = await fetch(`${worker.url}/data`);
-      expect(jsonResponse.status).toEqual(200);
-      const data = await jsonResponse.json();
+      const jsonResponse = await fetchAndExpectOK(`${worker.url}/data`);
+      const data: any = await jsonResponse.json();
       expect(data.message).toEqual("Hello from bundled worker!");
       expect(data.version).toEqual("1.0.0");
 
@@ -1754,15 +991,13 @@ describe("Worker Resource", () => {
 
       if (worker.url) {
         // Test that the worker was updated correctly
-        const response = await fetch(worker.url);
-        expect(response.status).toEqual(200);
+        const response = await fetchAndExpectOK(worker.url);
         const text = await response.text();
         expect(text).toEqual("Hello from updated entrypoint file!");
 
         // Test the updated JSON endpoint
-        const jsonResponse = await fetch(`${worker.url}/data`);
-        expect(jsonResponse.status).toEqual(200);
-        const data = await jsonResponse.json();
+        const jsonResponse = await fetchAndExpectOK(`${worker.url}/data`);
+        const data: any = await jsonResponse.json();
         expect(data.message).toEqual("Hello from updated bundled worker!");
         expect(data.version).toEqual("2.0.0");
       }
@@ -1772,14 +1007,28 @@ describe("Worker Resource", () => {
 
       // Clean up the worker
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   }, 120000); // Increased timeout for bundling operations
 
   test("create and test worker with cron triggers", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-cron`;
 
-    let worker: Worker | undefined = undefined;
+    // Sample worker script with a scheduled handler
+    const cronWorkerScript = `
+      export default {
+        async fetch(request, env, ctx) {
+          return new Response('Worker with cron is running!', { status: 200 });
+        },
+        async scheduled(event, env, ctx) {
+          // Log the scheduled event details
+          console.log('Scheduled event received:', event.scheduledTime, event.cron);
+          // In a real worker, you would perform tasks here
+        },
+      };
+    `;
+
+    let worker: Worker | undefined;
     try {
       // Create a worker with cron triggers
       worker = await Worker(workerName, {
@@ -1837,7 +1086,7 @@ describe("Worker Resource", () => {
       expect(removedTrigger).toBeUndefined();
     } finally {
       await destroy(scope);
-      await assertWorkerDoesNotExist(workerName);
+      await assertWorkerDoesNotExist(api, workerName);
     }
   }, 60000); // Increase timeout for Worker operations
 
@@ -1846,7 +1095,7 @@ describe("Worker Resource", () => {
     const targetWorkerName = `${BRANCH_PREFIX}-target-worker`;
     const callerWorkerName = `${BRANCH_PREFIX}-caller-worker`;
 
-    // Sample script for the target worker
+    // Script for the target worker
     const targetWorkerScript = `
       export default {
         async fetch(request, env, ctx) {
@@ -1877,7 +1126,7 @@ describe("Worker Resource", () => {
       };
     `;
 
-    // Sample script for the caller worker that will use the worker binding
+    // Script for the caller worker that will use the worker binding
     const callerWorkerScript = `
       export default {
         async fetch(request, env, ctx) {
@@ -1944,8 +1193,8 @@ describe("Worker Resource", () => {
       };
     `;
 
-    let targetWorker: Worker | undefined = undefined;
-    let callerWorker: Worker | undefined = undefined;
+    let targetWorker: Worker | undefined;
+    let callerWorker: Worker | undefined;
 
     try {
       // First create the target worker
@@ -1981,15 +1230,15 @@ describe("Worker Resource", () => {
       expect(callerWorker.bindings?.TARGET_WORKER).toBeDefined();
 
       // Test direct access to target worker works
-      const targetResponse = await fetch(targetWorker.url!);
-      expect(targetResponse.status).toEqual(200);
+      const targetResponse = await fetchAndExpectOK(targetWorker.url!);
       const targetText = await targetResponse.text();
       expect(targetText).toEqual("Target Worker is running!");
 
       // Test caller worker can access the target worker through binding
-      const callerResponse = await fetch(`${callerWorker.url}/call-target`);
-      expect(callerResponse.status).toEqual(200);
-      const callerData = await callerResponse.json();
+      const callerResponse = await fetchAndExpectOK(
+        `${callerWorker.url}/call-target`,
+      );
+      const callerData: any = await callerResponse.json();
 
       expect(callerData.success).toEqual(true);
       expect(callerData.callerName).toEqual(callerWorkerName);
@@ -2000,9 +1249,10 @@ describe("Worker Resource", () => {
       );
 
       // Test echo functionality to verify data passing works
-      const echoResponse = await fetch(`${callerWorker.url}/echo-test`);
-      expect(echoResponse.status).toEqual(200);
-      const echoData = await echoResponse.json();
+      const echoResponse = await fetchAndExpectOK(
+        `${callerWorker.url}/echo-test`,
+      );
+      const echoData: any = await echoResponse.json();
 
       expect(echoData.success).toEqual(true);
       expect(echoData.echoResponse).toBeDefined();
@@ -2014,8 +1264,949 @@ describe("Worker Resource", () => {
     } finally {
       await destroy(scope);
       // Verify both workers were deleted
-      await assertWorkerDoesNotExist(targetWorkerName);
-      await assertWorkerDoesNotExist(callerWorkerName);
+      await assertWorkerDoesNotExist(api, targetWorkerName);
+      await assertWorkerDoesNotExist(api, callerWorkerName);
     }
   }, 60000); // Increase timeout for Worker operations
+
+  test("create and delete worker with Analytics Engine binding", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-analytics-engine`;
+
+    let worker: Worker | undefined;
+    let dataset: AnalyticsEngineDataset | undefined;
+
+    try {
+      // Create an Analytics Engine dataset
+      dataset = AnalyticsEngineDataset("test-analytics-dataset", {
+        dataset: `${BRANCH_PREFIX}-test-analytics-dataset`,
+      });
+
+      expect(dataset.id).toBeTruthy();
+      expect(dataset.dataset).toEqual(
+        `${BRANCH_PREFIX}-test-analytics-dataset`,
+      );
+
+      // Create a worker with the analytics engine binding
+      worker = await Worker(workerName, {
+        name: workerName,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              const url = new URL(request.url);
+              
+              // Log an event to the analytics engine
+              if (url.pathname === '/log-event') {
+                try {
+                  const body = await request.json();
+                  
+                  // Write an event to the analytics dataset
+                  env.ANALYTICS.writeDataPoint({
+                    blobs: [body.action, body.category, body.details || ""],
+                    doubles: [body.value || 1.0],
+                    indexes: [body.userId || "anonymous"]
+                  });
+                  
+                  return Response.json({
+                    success: true,
+                    message: "Event logged successfully"
+                  });
+                } catch (error) {
+                  return Response.json({
+                    success: false,
+                    error: error.message || "Unknown error"
+                  }, { status: 500 });
+                }
+              }
+              
+              // Confirm binding exists
+              if (url.pathname === '/check-binding') {
+                return Response.json({
+                  hasBinding: !!env.ANALYTICS,
+                  bindingType: typeof env.ANALYTICS,
+                  success: true
+                });
+              }
+              
+              return new Response('Analytics Engine Worker is running!', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        url: true, // Enable workers.dev URL to test the worker
+        bindings: {
+          ANALYTICS: dataset,
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.bindings).toBeDefined();
+      expect(worker.bindings!.ANALYTICS).toBeDefined();
+      expect(worker.url).toBeTruthy();
+
+      // Test that the binding exists in the worker
+      const response = await fetchAndExpectOK(`${worker.url}/check-binding`);
+      const data: any = await response.json();
+      expect(data.success).toEqual(true);
+      expect(data.hasBinding).toEqual(true);
+
+      // Test logging an event
+      const logResponse = await fetchAndExpectOK(`${worker.url}/log-event`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "page_view",
+          category: "documentation",
+          details: "analytics_engine_page",
+          value: 1.0,
+          userId: "test-user-123",
+        }),
+      });
+
+      const logData: any = await logResponse.json();
+      expect(logData.success).toEqual(true);
+      expect(logData.message).toEqual("Event logged successfully");
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  }, 60000); // Increase timeout for Worker operations
+
+  test("can bind to a worker referenced by name", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-bind-by-name`;
+    const workerName2 = `${BRANCH_PREFIX}-test-worker-bind-by-name-2`;
+    try {
+      await Worker("worker1", {
+        name: workerName,
+        script: `export default { async fetch(request, env, ctx) { return new Response('Hello, world!'); } };`,
+        adopt: true,
+      });
+
+      const worker2 = await Worker("worker2", {
+        name: workerName2,
+        bindings: {
+          TARGET_WORKER: WorkerRef<{
+            foo(): Promise<string>;
+            __WORKER_ENTRYPOINT_BRAND: never;
+          }>({
+            service: workerName,
+          }),
+        },
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              // Call the target worker via the binding
+              const response = await env.TARGET_WORKER.fetch(request);
+              // Return the response from the target worker
+              return response;
+            }
+          };
+        `,
+      });
+
+      function _foo() {
+        // should type check
+        worker2.Env.TARGET_WORKER.foo();
+        // @ts-expect-error
+        worker2.Env.TARGET_WORKER.bar();
+      }
+
+      const response = await fetchAndExpectOK(worker2.url!);
+      const text = await response.text();
+      expect(text).toEqual("Hello, world!");
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("create unversioned and versioned workers independently", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-versions`;
+    const versionLabel = "pr-123";
+    let tempDir: string | undefined;
+
+    try {
+      // Create a temporary directory to store test assets
+      tempDir = path.join(".out", "alchemy-versioned-assets-test");
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+
+      // Create a simple test file
+      const testContent = "Hello from versioned static assets!";
+      await fs.writeFile(path.join(tempDir, "test.txt"), testContent);
+
+      // Create assets resource
+      const assets = await Assets({
+        path: tempDir,
+      });
+
+      // First create a base worker without version
+      const baseWorker = await Worker(`${workerName}-base`, {
+        name: workerName,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from base worker!', { 
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        url: true,
+      });
+
+      // Verify base worker properties
+      expect(baseWorker.id).toBeTruthy();
+      expect(baseWorker.name).toEqual(workerName);
+      expect(baseWorker.version).toBeUndefined();
+      expect(baseWorker.url).toBeTruthy();
+
+      // Test that the base worker URL works
+      const baseResponse = await fetchAndExpectOK(baseWorker.url!);
+      const baseText = await baseResponse.text();
+      expect(baseText).toEqual("Hello from base worker!");
+
+      // Now create a version of the same worker with assets binding
+      const versionWorker = await Worker(`${workerName}-version`, {
+        name: workerName,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              try {
+                // Use env.ASSETS.get() to retrieve the test file
+                const asset = await env.ASSETS.fetch(request);
+                if (asset) {
+                  const content = await asset.text();
+                  return new Response(content, { 
+                    status: 200,
+                    headers: { 'Content-Type': 'text/plain' }
+                  });
+                }
+                return new Response('Asset not found', { status: 200 });
+              } catch (error) {
+                console.error(error);
+                return new Response(error.message, { status: 500 });
+              }
+            }
+          };
+        `,
+        format: "esm",
+        version: versionLabel,
+        bindings: {
+          ASSETS: assets,
+        },
+        assets: {
+          run_worker_first: true,
+          not_found_handling: "single-page-application",
+        },
+        compatibilityFlags: ["nodejs_compat"],
+      });
+
+      // Verify the version worker properties
+      expect(versionWorker).toMatchObject({
+        name: workerName,
+        version: versionLabel,
+      });
+      expect(versionWorker.id).toBeTruthy();
+      expect(versionWorker.url).toBeTruthy();
+      expect(versionWorker.bindings?.ASSETS).toBeDefined();
+
+      // the live worker should not have the new content
+      await fetchAndExpect(
+        `${baseWorker.url!}/test.txt`,
+        "Hello from base worker!",
+      );
+
+      // the versioned worker should have the new content
+      await fetchAndExpect(`${versionWorker.url!}/test.txt`, testContent);
+    } finally {
+      // Clean up temporary directory
+      if (tempDir) {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test.skipIf(!ENABLE_PAID_TESTS)(
+    "adopt worker with existing migration tag",
+    async (scope) => {
+      const scriptName = `${BRANCH_PREFIX}-test-worker-adopt-migration`;
+
+      try {
+        await deleteWorker(api, {
+          scriptName,
+        });
+
+        const formData = new FormData();
+        formData.append(
+          "worker.js",
+          `
+          export class MyDO {}
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from migrated worker!', { status: 200 });
+            }
+          };
+        `,
+        );
+        formData.append(
+          "metadata",
+          new Blob([
+            JSON.stringify({
+              compatibility_date: "2025-05-18",
+              bindings: [
+                {
+                  type: "durable_object_namespace",
+                  class_name: "MyDO",
+                  name: "MY_DO",
+                },
+              ],
+              observability: {
+                enabled: true,
+              },
+              main_module: "worker.js",
+              migrations: {
+                new_tag: "v1",
+                old_tag: undefined,
+                new_classes: ["MyDO"],
+                deleted_classes: [],
+                renamed_classes: [],
+                transferred_classes: [],
+                new_sqlite_classes: [],
+              } satisfies SingleStepMigration,
+            }),
+          ]),
+        );
+
+        // Put the worker with migration tag v1
+        await api.post(
+          `/accounts/${api.accountId}/workers/scripts/${scriptName}/versions`,
+          formData,
+        );
+
+        // Now adopt the worker using the Worker resource
+        await Worker(scriptName, {
+          name: scriptName,
+          adopt: true,
+          script: `
+          export class MyDO2 {}
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from adopted worker with migration!', { status: 200 });
+            }
+          };
+        `,
+          format: "esm",
+          bindings: {
+            MY_DO: DurableObjectNamespace("test-counter-migration", {
+              className: "MyDO2",
+              scriptName: scriptName,
+            }),
+          },
+        });
+
+        await Worker(scriptName, {
+          name: scriptName,
+          adopt: true,
+          script: `
+          export class MyDO3 {}
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from adopted worker with migration!', { status: 200 });
+            }
+          };
+        `,
+          format: "esm",
+          bindings: {
+            MY_DO: DurableObjectNamespace("test-counter-migration", {
+              className: "MyDO3",
+              scriptName: scriptName,
+            }),
+          },
+        });
+      } finally {
+        await destroy(scope);
+        await assertWorkerDoesNotExist(api, scriptName);
+      }
+    },
+  );
+
+  test("create worker with url false and verify no workers.dev subdomain", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-no-url`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with url: false (disable workers.dev subdomain)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from worker without subdomain!', { status: 200 });
+            }
+          };
+        `,
+        format: "esm",
+        url: false, // Explicitly disable workers.dev URL
+      });
+
+      expect(worker.url).toBeUndefined(); // No URL should be provided
+
+      // Query Cloudflare API to verify subdomain is not enabled
+      await assertWorkersDevDisabled(workerName);
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("switch worker from url true to url false and verify subdomain is disabled", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-url-switch`;
+
+    let worker: Worker | undefined;
+    try {
+      // First create a worker with url: true (enable workers.dev subdomain)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from worker with subdomain!', { status: 200 });
+            }
+          };
+        `,
+        format: "esm",
+        url: true, // Enable workers.dev URL
+      });
+
+      expect(worker.url).toBeTruthy(); // URL should be provided
+
+      await assertWorkersDevEnabled(workerName);
+
+      // Test that the worker is accessible via the workers.dev subdomain
+      const enabledResponse = await fetchAndExpectOK(worker.url!);
+      const enabledText = await enabledResponse.text();
+      expect(enabledText).toEqual("Hello from worker with subdomain!");
+
+      // Now update the worker with url: false (disable workers.dev subdomain)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from worker without subdomain!', { status: 200 });
+            }
+          };
+        `,
+        format: "esm",
+        url: false, // Explicitly disable workers.dev URL
+      });
+
+      expect(worker.url).toBeUndefined(); // No URL should be provided after disabling
+
+      // Query Cloudflare API to verify subdomain is now disabled
+      await assertWorkersDevDisabled(workerName);
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("adopt worker without subdomain and enable url true", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-adopt-enable-url`;
+
+    const script = `
+      export default {
+        async fetch(request, env, ctx) {
+          return new Response('Hello from adopted worker with subdomain!', { status: 200 });
+        }
+      };
+    `;
+
+    try {
+      // First create a worker with url: false (no subdomain)
+      await Worker("initial-worker", {
+        name: workerName,
+        adopt: true,
+        script,
+        url: false, // Explicitly disable workers.dev URL
+      });
+
+      // Verify no subdomain is initially configured
+      await assertWorkersDevDisabled(workerName);
+
+      // Now adopt the worker with url: true to enable workers.dev subdomain
+      const worker = await Worker("adopted-worker", {
+        name: workerName,
+        adopt: true,
+        script,
+        url: true, // Enable workers.dev URL during adoption
+      });
+
+      expect(worker.url).toBeTruthy(); // URL should now be provided
+
+      await assertWorkersDevEnabled(workerName);
+
+      // Test that the worker is accessible via the workers.dev subdomain
+      const response = await fetchAndExpectOK(worker.url!);
+      const text = await response.text();
+      expect(text).toEqual("Hello from adopted worker with subdomain!");
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  async function assertWorkersDevEnabled(workerName: string) {
+    // Verify that the subdomain is now enabled via API
+    const subdomainResponse = await api.get(
+      `/accounts/${api.accountId}/workers/scripts/${workerName}/subdomain`,
+    );
+    expect(subdomainResponse.status).toEqual(200);
+
+    const subdomainData: any = await subdomainResponse.json();
+    expect(subdomainData.result?.enabled).toBeTruthy();
+  }
+
+  /**
+   * Helper function to assert that a worker's workers.dev subdomain is disabled
+   */
+  async function assertWorkersDevDisabled(workerName: string) {
+    // Query Cloudflare API to verify subdomain is disabled
+    const subdomainResponse = await api.get(
+      `/accounts/${api.accountId}/workers/scripts/${workerName}/subdomain`,
+    );
+
+    const subdomainData: any = await subdomainResponse.json();
+
+    if (subdomainResponse.status === 200) {
+      expect(subdomainData.result?.enabled).toBeFalsy();
+    } else {
+      // If 404, that also indicates no subdomain is configured
+      expect(subdomainResponse.status).toEqual(404);
+    }
+
+    // Also check if we can construct the workers.dev URL and verify it's inaccessible
+    try {
+      const workerSubdomainUrl = `https://${workerName}.${api.accountId.substring(0, 32)}.workers.dev`;
+
+      const subdomainTestResponse = await fetch(workerSubdomainUrl);
+
+      // If the fetch succeeds, the subdomain shouldn't be working
+      // Workers.dev subdomains that are disabled typically return 404 or 503
+      expect(subdomainTestResponse.status).toBeGreaterThanOrEqual(400);
+    } catch (error) {
+      // Network errors are also expected when subdomain is disabled
+      expect(error).toBeDefined();
+    }
+  }
+
+  test("destroy versioned worker does not delete base worker", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-version-preserve-base`;
+    const versionLabel = "test-version";
+
+    let baseWorker: Worker | undefined;
+    let versionedWorker: Worker | undefined;
+
+    try {
+      // First create a base worker
+      baseWorker = await Worker(`${workerName}-base`, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from base worker!', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        url: true,
+      });
+
+      expect(baseWorker.id).toBeTruthy();
+      expect(baseWorker.name).toEqual(workerName);
+      expect(baseWorker.version).toBeUndefined();
+      expect(baseWorker.url).toBeTruthy();
+
+      // Verify base worker exists and works
+      const baseResponse = await fetchAndExpectOK(baseWorker.url!);
+      const baseText = await baseResponse.text();
+      expect(baseText).toEqual("Hello from base worker!");
+
+      // Create a versioned worker with the same name
+      versionedWorker = await Worker(`${workerName}-version`, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from versioned worker!', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        version: versionLabel,
+      });
+
+      expect(versionedWorker.id).toBeTruthy();
+      expect(versionedWorker.name).toEqual(workerName);
+      expect(versionedWorker.version).toEqual(versionLabel);
+      expect(versionedWorker.url).toBeTruthy();
+
+      // Verify versioned worker exists and works
+      const versionResponse = await fetchAndExpectOK(versionedWorker.url!);
+      const versionText = await versionResponse.text();
+      expect(versionText).toEqual("Hello from versioned worker!");
+
+      // Now destroy ONLY the versioned worker
+      await destroy(versionedWorker);
+
+      // Verify the base worker still exists via API
+      const baseWorkerCheckResponse = await api.get(
+        `/accounts/${api.accountId}/workers/scripts/${workerName}`,
+      );
+      expect(baseWorkerCheckResponse.status).toEqual(200);
+
+      // Verify the base worker still works
+      const baseStillWorksResponse = await fetchAndExpectOK(baseWorker.url!);
+      const baseStillWorksText = await baseStillWorksResponse.text();
+      expect(baseStillWorksText).toEqual("Hello from base worker!");
+
+      // The versioned worker should no longer be accessible
+      // (Note: The version URL may still respond but it's effectively "deleted" from a management perspective)
+    } finally {
+      // Clean up the remaining base worker
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with compatibility preset", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-compatibility-preset`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with the "node" compatibility preset
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from Node.js compatible worker!', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        url: true,
+        compatibility: "node", // Use the "node" preset
+      });
+
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.url).toBeTruthy();
+
+      // Verify that the "node" preset automatically includes nodejs_compat flag
+      expect(worker.compatibilityFlags).toContain("nodejs_compat");
+
+      // Test that preset flags are combined with user-provided flags
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          import crypto from 'node:crypto';
+
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello from Node.js compatible worker with additional flags!', {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          };
+        `,
+        format: "esm",
+        url: true,
+        compatibility: "node",
+        compatibilityFlags: ["nodejs_als"], // Add valid compatibility flag in addition to preset
+      });
+
+      // Verify that both preset flags and user-provided flags are present
+      expect(worker.compatibilityFlags).toContain("nodejs_compat"); // From preset
+      expect(worker.compatibilityFlags).toContain("nodejs_als"); // From user
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("rename worker", async (scope) => {
+    const originalWorkerName = `${BRANCH_PREFIX}-test-worker-rename-1`;
+    const newWorkerName = `${BRANCH_PREFIX}-test-worker-rename-2`;
+    try {
+      await Worker("rename-worker", {
+        name: originalWorkerName,
+        script: `
+				export default {
+					async fetch(request, env, ctx) {
+						return new Response('Hello ESM world!', { status: 200 });
+					}
+				};
+			`,
+      });
+
+      await scope.finalize();
+
+      // Verify the worker exists via API
+      const originalWorkerExists = await api.get(
+        `/accounts/${api.accountId}/workers/scripts/${originalWorkerName}`,
+      );
+      expect(originalWorkerExists.status).toEqual(200);
+
+      await Worker("rename-worker", {
+        name: newWorkerName,
+        script: `
+				export default {
+					async fetch(request, env, ctx) {
+						return new Response('Hello ESM world!', { status: 200 });
+					}
+				};
+			`,
+      });
+
+      await scope.finalize();
+
+      // Verify the worker exists via API
+      const newWorkerExists = await api.get(
+        `/accounts/${api.accountId}/workers/scripts/${newWorkerName}`,
+      );
+      expect(newWorkerExists.status).toEqual(200);
+
+      // Verify the worker exists via API
+      const oldWorker = await api.get(
+        `/accounts/${api.accountId}/workers/scripts/${originalWorkerName}`,
+      );
+      expect(oldWorker.status).toEqual(404);
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  /**
+   * Helper function to assert that a WFP worker exists
+   */
+  async function assertWorkerExistsInNamespace(
+    api: any,
+    namespaceName: string,
+    workerName: string,
+  ) {
+    const response = await api.get(
+      `/accounts/${api.accountId}/workers/dispatch/namespaces/${namespaceName}/scripts/${workerName}`,
+    );
+    expect(response.status).toEqual(200);
+
+    const worker = (await listWorkersInNamespace(api, namespaceName)).find(
+      (worker) => worker.id === workerName,
+    );
+    expect(worker).toBeDefined();
+  }
+
+  /**
+   * Helper function to assert that a WFP worker does not exist
+   */
+  async function assertWorkerNotExistsInNamespace(
+    api: any,
+    namespaceName: string,
+    workerName: string,
+  ) {
+    // If we've exhausted retries and worker still exists, fail the test
+    expect(
+      (await listWorkersInNamespace(api, namespaceName)).some(
+        (worker) => worker.id === workerName,
+      ),
+    ).toBeFalsy();
+  }
+
+  test.skipIf(!ENABLE_WFP_TESTS)("rename wfp worker", async (scope) => {
+    const originalWorkerName = `${BRANCH_PREFIX}-test-wfp-worker-rename-1`;
+    const newWorkerName = `${BRANCH_PREFIX}-test-wfp-worker-rename-2`;
+    const namespaceName = `${BRANCH_PREFIX}-rename-wfp-worker`;
+
+    try {
+      const dispatchNamespace = await DispatchNamespace(
+        "test-dispatch-namespace",
+        {
+          namespace: namespaceName,
+          adopt: true,
+        },
+      );
+
+      await Worker("rename-worker", {
+        name: originalWorkerName,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello ESM world!', { status: 200 });
+            }
+          };
+        `,
+        namespace: dispatchNamespace,
+      });
+
+      // Verify the worker exists via API
+      await assertWorkerExistsInNamespace(
+        api,
+        namespaceName,
+        originalWorkerName,
+      );
+
+      await Worker("rename-worker", {
+        name: newWorkerName,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello ESM world!', { status: 200 });
+            }
+          };
+        `,
+        namespace: dispatchNamespace,
+      });
+
+      await scope.finalize();
+
+      // Verify the new worker exists via API
+      await assertWorkerExistsInNamespace(api, namespaceName, newWorkerName);
+
+      // Verify the old worker does not exist via API
+      await assertWorkerNotExistsInNamespace(
+        api,
+        namespaceName,
+        originalWorkerName,
+      );
+    } finally {
+      // await destroy(scope);
+    }
+  });
+
+  test("create worker with smart placement", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-placement`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with smart placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello smart placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          mode: "smart",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        mode: "smart",
+      });
+
+      // Update the worker to disable smart placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means smart placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with cpu_ms limit", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-cpu-ms`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with smart placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello smart placement!', { status: 200 });
+            }
+          };
+        `,
+        limits: {
+          cpu_ms: 300_000,
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.limits).toEqual({
+        cpu_ms: 300_000,
+      });
+
+      // Update the worker to disable smart placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means smart placement is disabled
+      });
+
+      // Verify the limits were disabled (undefined)
+      expect(worker.limits).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
 });

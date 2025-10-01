@@ -1,13 +1,14 @@
-import { alchemy } from "../alchemy.js";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { sha256 } from "../util/sha256.js";
-import { createCloudflareApi, type CloudflareApiOptions } from "./api.js";
+import { alchemy } from "../alchemy.ts";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { sha256 } from "../util/sha256.ts";
+import { createCloudflareApi, type CloudflareApiOptions } from "./api.ts";
 import {
   PermissionGroups,
   type PermissionGroupName,
-} from "./permission-groups.js";
+} from "./permission-groups.ts";
 
 /**
  * Permission group for a token policy
@@ -87,7 +88,7 @@ export interface AccountApiTokenProps extends CloudflareApiOptions {
   /**
    * Name of the token
    */
-  name: string;
+  name?: string;
 
   /**
    * Policies that define what the token can access
@@ -139,8 +140,7 @@ interface CloudflareApiToken {
 /**
  * Output returned after Account API Token creation/update
  */
-export interface AccountApiToken
-  extends Resource<"cloudflare::AccountApiToken"> {
+export interface AccountApiToken {
   /**
    * The ID of the token
    *
@@ -257,6 +257,8 @@ export const AccountApiToken = Resource(
     // Create Cloudflare API client with automatic account discovery
     const api = await createCloudflareApi(props);
 
+    const tokenName = props.name ?? this.scope.createPhysicalName(id);
+
     if (this.phase === "delete") {
       // Delete token if we have an ID
       if (this.output?.id) {
@@ -269,10 +271,10 @@ export const AccountApiToken = Resource(
             const errorData: any = await deleteResponse.json().catch(() => ({
               errors: [{ message: deleteResponse.statusText }],
             }));
-            console.error(`Error deleting token '${props.name}':`, errorData);
+            logger.error(`Error deleting token '${tokenName}':`, errorData);
           }
         } catch (error) {
-          console.error(`Error deleting token '${props.name}':`, error);
+          logger.error(`Error deleting token '${tokenName}':`, error);
         }
       }
 
@@ -287,7 +289,7 @@ export const AccountApiToken = Resource(
 
     // Transform our properties to API format
     const apiPayload = {
-      name: props.name,
+      name: tokenName,
       policies: props.policies.map((policy) => ({
         effect: policy.effect,
         permission_groups: policy.permissionGroups.map((pg) =>
@@ -361,7 +363,7 @@ export const AccountApiToken = Resource(
       }));
 
       throw new Error(
-        `Error ${this.phase === "update" ? "updating" : "creating"} token '${props.name}': ${
+        `Error ${this.phase === "update" ? "updating" : "creating"} token '${tokenName}': ${
           errorData.errors?.[0]?.message || response.statusText
         }`,
       );
@@ -375,14 +377,14 @@ export const AccountApiToken = Resource(
     } else {
       if (!this.output?.value) {
         throw new Error(
-          `Token '${props.name}' was created but we have no record of its value. Try deleting and recreating the token.`,
+          `Token '${tokenName}' was created but we have no record of its value. Try deleting and recreating the token.`,
         );
       }
       tokenValue = this.output?.value;
     }
 
     // Transform API response to our format
-    return this({
+    return {
       id: tokenData.id,
       name: tokenData.name,
       status: tokenData.status,
@@ -403,6 +405,6 @@ export const AccountApiToken = Resource(
       value: tokenValue,
       accessKeyId: alchemy.secret(tokenData.id),
       secretAccessKey: alchemy.secret(sha256(tokenValue.unencrypted)),
-    });
+    };
   },
 );

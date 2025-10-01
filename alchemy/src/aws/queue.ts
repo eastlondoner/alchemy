@@ -1,12 +1,8 @@
-import {
-  CreateQueueCommand,
-  DeleteQueueCommand,
-  GetQueueAttributesCommand,
-  GetQueueUrlCommand,
-  SQSClient,
-} from "@aws-sdk/client-sqs";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { importPeer } from "../util/peer.ts";
+import { retry } from "./retry.ts";
 
 /**
  * Properties for creating or updating an SQS queue
@@ -15,8 +11,10 @@ export interface QueueProps {
   /**
    * Name of the queue
    * For FIFO queues, the name must end with the .fifo suffix
+   *
+   * @default ${app}-${stage}-${id}?.fifo
    */
-  queueName: string;
+  queueName?: string;
 
   /**
    * Whether this is a FIFO queue.
@@ -81,11 +79,16 @@ export interface QueueProps {
 /**
  * Output returned after SQS queue creation/update
  */
-export interface Queue extends Resource<"sqs::Queue">, QueueProps {
+export interface Queue extends QueueProps {
   /**
    * ARN of the queue
    */
   arn: string;
+
+  /**
+   * Name of the Queue
+   */
+  queueName: string;
 
   /**
    * URL of the queue
@@ -139,44 +142,66 @@ export const Queue = Resource(
     id: string,
     props: QueueProps,
   ): Promise<Queue> {
+    const {
+      CreateQueueCommand,
+      DeleteQueueCommand,
+      GetQueueAttributesCommand,
+      GetQueueUrlCommand,
+      QueueDeletedRecently,
+      QueueDoesNotExist,
+      SQSClient,
+    } = await importPeer(import("@aws-sdk/client-sqs"), "sqs::Queue");
     const client = new SQSClient({});
     // Don't automatically add .fifo suffix - user must include it in queueName
-    const queueName = props.queueName;
+    const queueName =
+      props.queueName ??
+      this.output?.queueName ??
+      `${this.scope.createPhysicalName(id)}${props.fifo ? ".fifo" : ""}`;
 
-    // Validate that FIFO queues have .fifo suffix
     if (props.fifo && !queueName.endsWith(".fifo")) {
+      // Validate that FIFO queues have .fifo suffix
       throw new Error("FIFO queue names must end with .fifo suffix");
+    }
+
+    if (this.phase === "update" && this.output.queueName !== queueName) {
+      this.replace();
     }
 
     if (this.phase === "delete") {
       try {
         // Get queue URL first
-        const urlResponse = await client.send(
-          new GetQueueUrlCommand({
-            QueueName: queueName,
-          }),
+        const urlResponse = await retry(() =>
+          client.send(
+            new GetQueueUrlCommand({
+              QueueName: queueName,
+            }),
+          ),
         );
 
         // Delete the queue
-        await client.send(
-          new DeleteQueueCommand({
-            QueueUrl: urlResponse.QueueUrl,
-          }),
+        await retry(() =>
+          client.send(
+            new DeleteQueueCommand({
+              QueueUrl: urlResponse.QueueUrl,
+            }),
+          ),
         );
 
         // Wait for queue to be deleted
         let queueDeleted = false;
         while (!queueDeleted) {
           try {
-            await client.send(
-              new GetQueueUrlCommand({
-                QueueName: queueName,
-              }),
-            );
+            await retry(() => {
+              return client.send(
+                new GetQueueUrlCommand({
+                  QueueName: queueName,
+                }),
+              );
+            });
             // If we get here, queue still exists
             await new Promise((resolve) => setTimeout(resolve, 1000));
           } catch (error: any) {
-            if (error.name === "QueueDoesNotExist") {
+            if (isQueueDoesNotExist(error)) {
               queueDeleted = true;
             } else {
               throw error;
@@ -184,11 +209,11 @@ export const Queue = Resource(
           }
         }
       } catch (error: any) {
-        if (error.name !== "QueueDoesNotExist") {
+        logger.log(error.message);
+        if (!isQueueDoesNotExist(error)) {
           throw error;
         }
       }
-
       return this.destroy();
     }
     // Create queue with attributes
@@ -236,85 +261,78 @@ export const Queue = Resource(
 
     try {
       // Create the queue
-      const createResponse = await client.send(
-        new CreateQueueCommand({
-          QueueName: queueName,
-          Attributes: attributes,
-          tags,
-        }),
+      const createResponse = await retry(
+        () =>
+          client.send(
+            new CreateQueueCommand({
+              QueueName: queueName,
+              Attributes: attributes,
+              tags,
+            }),
+          ),
+        (err) => isQueueDeletedRecently(err),
       );
 
       // Get queue attributes
-      const attributesResponse = await client.send(
-        new GetQueueAttributesCommand({
-          QueueUrl: createResponse.QueueUrl,
-          AttributeNames: ["QueueArn"],
-        }),
-      );
-
-      return this({
-        ...props,
-        arn: attributesResponse.Attributes!.QueueArn!,
-        url: createResponse.QueueUrl!,
-      });
-    } catch (error: any) {
-      if (error.name === "QueueAlreadyExists") {
-        // Get existing queue URL
-        const urlResponse = await client.send(
-          new GetQueueUrlCommand({
-            QueueName: queueName,
-          }),
-        );
-
-        // Get queue attributes
-        const attributesResponse = await client.send(
+      const attributesResponse = await retry(() =>
+        client.send(
           new GetQueueAttributesCommand({
-            QueueUrl: urlResponse.QueueUrl,
+            QueueUrl: createResponse.QueueUrl,
             AttributeNames: ["QueueArn"],
           }),
-        );
+        ),
+      );
 
-        return this({
-          ...props,
-          arn: attributesResponse.Attributes!.QueueArn!,
-          url: urlResponse.QueueUrl!,
-        });
-      }
-      if (error.name === "QueueDeletedRecently") {
+      return {
+        ...props,
+        arn: attributesResponse.Attributes!.QueueArn!,
+        queueName,
+        url: createResponse.QueueUrl!,
+      };
+    } catch (error: any) {
+      if (isQueueDeletedRecently(error)) {
+        logger.log(
+          `Queue "${queueName}" was recently deleted and can't be re-created. Waiting and retrying...`,
+        );
         // Queue was recently deleted, wait and retry
-        const maxRetries = 3;
+        const maxRetries = 61;
         let retryCount = 0;
 
         while (retryCount < maxRetries) {
           try {
-            // Wait for 60 seconds before retrying
-            await new Promise((resolve) => setTimeout(resolve, 61000));
+            // Wait for 1 second before retrying
+            await new Promise((resolve) => setTimeout(resolve, 1000));
 
             // Retry creating the queue
-            const createResponse = await client.send(
-              new CreateQueueCommand({
-                QueueName: queueName,
-                Attributes: attributes,
-                tags,
-              }),
+            const createResponse = await retry(() =>
+              client.send(
+                new CreateQueueCommand({
+                  QueueName: queueName,
+                  Attributes: attributes,
+                  tags,
+                }),
+              ),
             );
 
             // Get queue attributes
-            const attributesResponse = await client.send(
-              new GetQueueAttributesCommand({
-                QueueUrl: createResponse.QueueUrl,
-                AttributeNames: ["QueueArn"],
-              }),
+            const attributesResponse = await retry(() =>
+              client.send(
+                new GetQueueAttributesCommand({
+                  QueueUrl: createResponse.QueueUrl,
+                  AttributeNames: ["QueueArn"],
+                }),
+              ),
             );
 
-            return this({
+            return {
               ...props,
               arn: attributesResponse.Attributes!.QueueArn!,
+              queueName,
               url: createResponse.QueueUrl!,
-            });
+            };
           } catch (retryError: any) {
             if (
-              retryError.name !== "QueueDeletedRecently" ||
+              !isQueueDeletedRecently(retryError) ||
               retryCount === maxRetries - 1
             ) {
               throw retryError;
@@ -324,6 +342,26 @@ export const Queue = Resource(
         }
       }
       throw error;
+    }
+
+    function isQueueDoesNotExist(
+      error: any,
+    ): error is typeof QueueDoesNotExist {
+      return (
+        error.name === "QueueDoesNotExist" ||
+        error.Code === "AWS.SimpleQueueService.NonExistentQueue" ||
+        error instanceof QueueDoesNotExist
+      );
+    }
+
+    function isQueueDeletedRecently(
+      error: any,
+    ): error is typeof QueueDeletedRecently {
+      return (
+        error instanceof QueueDeletedRecently ||
+        error.Code === "AWS.SimpleQueueService.QueueDeletedRecently" ||
+        error.name === "QueueDeletedRecently"
+      );
     }
   },
 );

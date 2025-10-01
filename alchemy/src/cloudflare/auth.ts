@@ -1,232 +1,166 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import type { Secret } from "../secret.js";
-/**
- * Authentication options for Cloudflare API
- */
-export type CloudflareAuthOptions =
-  | CloudflareApiKeyAuthOptions
-  | CloudflareApiTokenAuthOptions;
+import assert from "node:assert";
+import { Credentials } from "../auth.ts";
+import { OAuthClient } from "../util/oauth-client.ts";
 
-export type CloudflareApiKeyAuthOptions = {
-  /**
-   * API Key to use with API Key
-   */
-  apiKey: Secret;
-  /**
-   * Email to use with API Key
-   * If not provided, will attempt to discover from Cloudflare API
-   */
-  email: string;
-
-  /**
-   * API Token to use with API Key
-   */
-  apiToken?: undefined;
-};
-
-export function isCloudflareApiKeyAuthOptions(
-  options: CloudflareAuthOptions | undefined,
-): options is CloudflareApiKeyAuthOptions {
-  return options !== undefined && options.apiKey !== undefined;
-}
-
-export type CloudflareApiTokenAuthOptions = {
-  /**
-   * API Token to use with API Key
-   */
-  apiToken?: Secret;
-
-  /**
-   * API Key to use with API Token
-   */
-  apiKey?: undefined;
-
-  /**
-   * Email to use with API Token
-   */
-  email?: undefined;
-};
-
-export function isCloudflareApiTokenAuthOptions(
-  options: CloudflareAuthOptions | undefined,
-): options is CloudflareApiTokenAuthOptions {
-  return options !== undefined && options.apiToken !== undefined;
-}
-
-export async function getCloudflareAuthHeaders(
-  options: CloudflareAuthOptions | undefined,
-): Promise<Record<string, string>> {
-  if (isCloudflareApiKeyAuthOptions(options)) {
-    // Global API Key
-    return {
-      "X-Auth-Key": options.apiKey.unencrypted,
-      "X-Auth-Email": options.email,
-    };
-  } else if (isCloudflareApiTokenAuthOptions(options)) {
-    // API Token
-    return {
-      Authorization: `Bearer ${options.apiToken?.unencrypted}`,
-    };
-  }
-  // Wrangler OAuth Token
-  const authConfig = await getRefreshedAuthConfig();
-  if (authConfig.oauth_token) {
-    return {
-      Authorization: `Bearer ${authConfig.oauth_token}`,
-    };
-  }
-  throw new Error(
-    "Cloudflare authentication required. Did you forget to login with `wrangler login` or set CLOUDFLARE_API_TOKEN, CLOUDFLARE_API_KEY?",
-  );
-}
-
-async function refreshAuthToken(
-  options: WranglerConfig,
-): Promise<WranglerConfig> {
-  const response = await fetch("https://dash.cloudflare.com/oauth2/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+export namespace CloudflareAuth {
+  export const client = new OAuthClient({
+    clientId: "6d8c2255-0773-45f6-b376-2914632e6f91",
+    redirectUri: "http://localhost:9976/auth/callback",
+    endpoints: {
+      authorize: "https://dash.cloudflare.com/oauth2/authorize",
+      token: "https://dash.cloudflare.com/oauth2/token",
+      revoke: "https://dash.cloudflare.com/oauth2/revoke",
     },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: options.refresh_token!,
-      client_id: "54d11594-84e4-41aa-b438-e81b8fa78ee7",
-    }).toString(),
   });
 
-  if (!response.ok) {
-    throw new Error(
-      `Failed to refresh auth token: ${response.status} ${response.statusText}`,
-    );
-  }
-
-  const data: any = await response.json();
-  if (!data.access_token) {
-    throw new Error("Failed to refresh auth token - no access token returned");
-  }
-
-  options.oauth_token = data.access_token;
-  options.refresh_token = data.refresh_token;
-  options.expiration_time = new Date(
-    Date.now() + data.expires_in * 1000,
-  ).toISOString();
-  options.scopes = data.scope?.split(" ") || [];
-
-  return options;
-}
-
-interface WranglerConfig {
-  path: string;
-  oauth_token?: string;
-  refresh_token?: string;
-  expiration_time?: string;
-  scopes?: string[];
-  /** exists is `false` if the config file doesn't exist, like in CI */
-  exists?: boolean;
-  /** @deprecated - this field was only provided by the deprecated v1 `wrangler config` command. */
-  api_token?: string;
-}
-
-async function getRefreshedAuthConfig(): Promise<WranglerConfig> {
-  let authConfig = await readWranglerConfig();
-  if (authConfig.expiration_time) {
-    const expiry = new Date(authConfig.expiration_time);
-    // if expiring in 10s
-    if (expiry.getTime() < Date.now() + 10 * 1000) {
-      authConfig = await refreshAuthToken(authConfig);
-      authConfigCache[authConfig.path] = authConfig;
-      await writeWranglerConfig(authConfig);
-    }
-  }
-  return authConfig;
-}
-
-async function writeWranglerConfig(config: WranglerConfig) {
-  if (config.exists === false) return;
-
-  const TOML = await import("@iarna/toml");
-  const configPath = await findWranglerConfig();
-  config = {
-    ...config,
+  export type Metadata = {
+    id: string;
+    name: string;
   };
-  // @ts-ignore - i put this here
-  delete config.path;
-  const toml = TOML.stringify(config as any);
-  await fs.writeFile(configPath, toml);
-}
+  export const ALL_SCOPES = {
+    // TODO: Verify descriptions marked with `//*`
+    "access:read": "Read Cloudflare Access", //*
+    "access:write": "Write Cloudflare Access", //*
+    "account:read":
+      "See your account info such as account details, analytics, and memberships.",
+    "agw:read": "Read API Gateway", //*
+    "agw:run": "Run API Gateway", //*
+    "ai:read": "Read access to Workers AI catalog and assets",
+    "ai:write": "See and change Workers AI catalog and assets",
+    "aiaudit:read": "Read AI Audit", //*
+    "aiaudit:write": "Write AI Audit", //*
+    "aig:read": "Read AI Gateway", //*
+    "aig:write": "Write AI Gateway", //*
+    "auditlogs:read": "Read audit logs", //*
+    "browser:read": "Read Browser", //*
+    "browser:write": "Write Browser", //*
+    "cfone:read": "Read Cloudflare One", //*
+    "cfone:write": "Write Cloudflare One", //*
+    "cloudchamber:write": "Manage Cloudchamber",
+    "constellation:write": "Write Constellation", //*
+    "containers:write": "Manage Workers Containers",
+    "d1:write": "See and change D1 Databases.",
+    "dex:read": "Read DEX", //*
+    "dex:write": "Write DEX", //*
+    "dns_analytics:read": "Read DNS analytics",
+    "dns_records:edit": "Edit DNS records",
+    "dns_records:read": "Read DNS records",
+    "dns_settings:read": "Read DNS settings",
+    "firstpartytags:write": "Write First Party Tags", //*
+    "lb:edit": "Edit Load Balancer", //*
+    "lb:read": "Read Load Balancer", //*
+    "logpush:read": "Read Logpush", //*
+    "logpush:write": "Write Logpush", //*
+    "notification:read": "Read Notifications", //*
+    "notification:write": "Write Notifications", //*
+    "pages:read": "Read access to Pages projects, settings, and deployments.",
+    "pages:write": "See and change Pages projects, settings, and deployments.",
+    "pipelines:read": "Read access to Pipelines configurations and data",
+    "pipelines:setup": "Setup access to Pipelines configurations and data",
+    "pipelines:write": "See and change Pipelines configurations and data",
+    "query_cache:write": "Write Query Cache", //*
+    "queues:write": "See and change Queues settings and data",
+    "r2_catalog:write": "Write R2 Catalog", //*
+    "radar:read": "Read Radar", //*
+    "rag:read": "Read RAG", //*
+    "rag:write": "Write RAG", //*
+    "secrets_store:read":
+      "Read access to secrets + stores within the Secrets Store",
+    "secrets_store:write":
+      "See and change secrets + stores within the Secrets Store",
+    "sso-connector:read": "Read SSO Connector", //*
+    "sso-connector:write": "Write SSO Connector", //*
+    "ssl_certs:write": "See and manage mTLS certificates for your account",
+    "teams:pii": "Read Teams PII", //*
+    "teams:read": "Read Teams", //*
+    "teams:secure_location": "Read Secure Location", //*
+    "teams:write": "Write Teams", //*
+    "url_scanner:read": "Read URL Scanner", //*
+    "url_scanner:write": "Write URL Scanner", //*
+    "user:read":
+      "See your user info such as name, email address, and account memberships.",
+    "vectorize:write": "Write Vectorize", //*
+    "workers:write":
+      "See and change Cloudflare Workers data such as zones, KV storage, namespaces, scripts, and routes.",
+    "workers_builds:read": "Read Workers Builds", //*
+    "workers_builds:write": "Write Workers Builds", //*
+    "workers_kv:write":
+      "See and change Cloudflare Workers KV Storage data such as keys and namespaces.",
+    "workers_observability:read": "Read Workers Observability", //*
+    "workers_observability:write": "Write Workers Observability", //*
+    "workers_observability_telemetry:write":
+      "Write Workers Observability Telemetry", //*
+    "workers_routes:write":
+      "See and change Cloudflare Workers data such as filters and routes.",
+    "workers_scripts:write":
+      "See and change Cloudflare Workers scripts, durable objects, subdomains, triggers, and tail data.",
+    "workers_tail:read": "See Cloudflare Workers tail and script data.",
+    "zone:read": "Grants read level access to account zone.",
+    // Not granted yet
+    // "connectivity:admin":
+    //   "See, change, and bind to Connectivity Directory services, including creating services targeting Cloudflare Tunnel.",
+  };
+  export const DEFAULT_SCOPES = [
+    "account:read",
+    "user:read",
+    "workers:write",
+    "workers_kv:write",
+    "workers_routes:write",
+    "workers_scripts:write",
+    "workers_tail:read",
+    "d1:write",
+    "pages:write",
+    "zone:read",
+    "ssl_certs:write",
+    "ai:write",
+    "queues:write",
+    "pipelines:write",
+    "secrets_store:write",
+    "containers:write",
+    "cloudchamber:write",
+  ];
 
-// cache the file once per process
-const authConfigCache: Record<string, WranglerConfig> = {};
-
-async function readWranglerConfig(): Promise<WranglerConfig> {
-  const configPath = await findWranglerConfig();
-  try {
-    const config = (authConfigCache[configPath] ??= await parseTOML(
-      await fs.readFile(configPath, "utf-8"),
-    ));
-    config.path = configPath;
-
-    return config;
-  } catch (e: any) {
-    if (e.code === "ENOENT") {
-      // The config doesn't exist
-      return {
-        path: configPath,
-        exists: false,
-      };
+  /**
+   * Format Cloudflare credentials as headers, refreshing OAuth credentials if expired.
+   * If the credentials are OAuth, the `profile` is required so we can read and write the updated credentials.
+   */
+  export const formatHeadersWithRefresh = async (input: {
+    profile: string | undefined;
+    credentials: Credentials;
+  }) => {
+    // if the credentials are not expired, return them as is
+    if (!Credentials.isOAuthExpired(input.credentials)) {
+      return formatHeaders(input.credentials);
     }
+    assert(input.profile, "Profile is required for OAuth credentials");
+    const credentials = await Credentials.getRefreshed(
+      {
+        provider: "cloudflare",
+        profile: input.profile,
+      },
+      async (credentials) => {
+        return await client.refresh(credentials);
+      },
+    );
+    return formatHeaders(credentials);
+  };
 
-    throw e;
-  }
-}
-
-let wranglerConfigPath: string | undefined;
-
-async function findWranglerConfig(): Promise<string> {
-  if (wranglerConfigPath) {
-    return wranglerConfigPath;
-  }
-  const environment = process.env.WRANGLER_API_ENVIRONMENT ?? "production";
-  const filePath = path.join(
-    "config",
-    `${environment === "production" ? "default.toml" : `${environment}.toml`}`,
-  );
-
-  const xdgAppPaths = (await import("xdg-app-paths")).default;
-  //TODO: We should implement a custom path --global-config and/or the WRANGLER_HOME type environment variable
-  const configDir = xdgAppPaths(".wrangler").config(); // New XDG compliant config path
-  const legacyConfigDir = path.join(os.homedir(), ".wrangler"); // Legacy config in user's home directory
-
-  // Check for the .wrangler directory in root if it is not there then use the XDG compliant path.
-  wranglerConfigPath = path.join(
-    (await isDirectory(legacyConfigDir)) ? legacyConfigDir : configDir,
-    filePath,
-  );
-  return wranglerConfigPath;
-}
-
-async function parseTOML(input: string): Promise<any> {
-  const TOML = await import("@iarna/toml");
-  try {
-    // Normalize CRLF to LF to avoid hitting https://github.com/iarna/iarna-toml/issues/33.
-    const normalizedInput = input.replace(/\r\n/g, "\n");
-    return TOML.parse(normalizedInput);
-  } catch (err: any) {
-    const { name } = err;
-    if (name !== "TomlError") {
-      throw err;
+  /**
+   * Format Cloudflare credentials as headers.
+   */
+  export const formatHeaders = (
+    credentials: Credentials,
+  ): Record<string, string> => {
+    switch (credentials.type) {
+      case "api-key":
+        return {
+          "X-Auth-Key": credentials.apiKey,
+          "X-Auth-Email": credentials.email,
+        };
+      case "api-token":
+        return { Authorization: `Bearer ${credentials.apiToken}` };
+      case "oauth":
+        return { Authorization: `Bearer ${credentials.access}` };
     }
-    throw new Error("TOML parse error");
-  }
-}
-
-async function isDirectory(dir: string) {
-  try {
-    return (await fs.stat(dir)).isDirectory();
-  } catch (err) {
-    return false;
-  }
+  };
 }

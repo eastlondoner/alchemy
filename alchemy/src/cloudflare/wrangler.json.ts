@@ -1,12 +1,21 @@
-import type { Context } from "../context.js";
-import { StaticJsonFile } from "../fs/static-json-file.js";
-import { Resource } from "../resource.js";
-import { Self, type Bindings } from "./bindings.js";
-import type { DurableObjectNamespace } from "./durable-object-namespace.js";
-import type { EventSource } from "./event-source.js";
-import { isQueueEventSource } from "./event-source.js";
-import { isQueue } from "./queue.js";
-import type { Worker } from "./worker.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { Scope } from "../scope.ts";
+import { isSecret } from "../secret.ts";
+import { assertNever } from "../util/assert-never.ts";
+import type { Bindings, WorkerBindingRateLimit } from "./bindings.ts";
+import type { R2BucketJurisdiction } from "./bucket.ts";
+import type { DurableObjectNamespace } from "./durable-object-namespace.ts";
+import type { EventSource } from "./event-source.ts";
+import { isQueueEventSource } from "./event-source.ts";
+import { isQueue } from "./queue.ts";
+import type { Worker, WorkerProps } from "./worker.ts";
+
+type WranglerJsonRateLimit = Omit<WorkerBindingRateLimit, "type"> & {
+  type: "rate_limit";
+};
 
 /**
  * Properties for wrangler.json configuration file
@@ -16,11 +25,15 @@ export interface WranglerJsonProps {
   /**
    * The worker to generate the wrangler.json file for
    */
-  worker: Worker;
+  worker:
+    | Worker<any>
+    | (WorkerProps<any> & {
+        name: string;
+      });
   /**
    * Path to write the wrangler.json file to
    *
-   * @default cwd/wrangler.json
+   * @default worker.cwd/wrangler.json
    */
   path?: string;
 
@@ -30,14 +43,48 @@ export interface WranglerJsonProps {
    * @default worker.entrypoint
    */
   main?: string;
+
+  /**
+   * Path to the assets directory
+   *
+   * @default inferred from the worker's Asset bindings
+   */
+  assets?: {
+    binding: string;
+    directory: string;
+  };
+
+  /**
+   * Whether to include secrets in the wrangler.json file
+   *
+   * @default true
+   */
+  secrets?: boolean;
+
+  /**
+   * Transform hooks to modify generated configuration files
+   */
+  transform?: {
+    /**
+     * Hook to modify the wrangler.json object before it's written
+     *
+     * This function receives the generated wrangler.json spec and should return
+     * a modified version. It's applied as the final transformation before the
+     * file is written to disk.
+     *
+     * @param spec - The generated wrangler.json specification
+     * @returns The modified wrangler.json specification
+     */
+    wrangler?: (
+      spec: WranglerJsonSpec,
+    ) => WranglerJsonSpec | Promise<WranglerJsonSpec>;
+  };
 }
 
 /**
  * Output returned after WranglerJson creation/update
  */
-export interface WranglerJson
-  extends Resource<"cloudflare::WranglerJson">,
-    WranglerJsonProps {
+export interface WranglerJson extends WranglerJsonProps {
   /**
    * Time at which the file was created
    */
@@ -59,62 +106,127 @@ export interface WranglerJson
   spec: WranglerJsonSpec;
 }
 
+// we are deprecating the WranglerJson resource (it is now just a funciton)
+// but, a user may still have a resource that depends on it, so we register a no-op dummy resource so that it can be cleanly delted
+Resource("cloudflare::WranglerJson", async function (this: Context<any>) {
+  if (this.phase === "delete") {
+    return this.destroy();
+  }
+
+  throw new Error("Not implemented");
+});
+
 /**
  * Resource for managing wrangler.json configuration files
  */
-export const WranglerJson = Resource(
-  "cloudflare::WranglerJson",
-  async function (
-    this: Context<WranglerJson>,
-    id: string,
-    props: WranglerJsonProps,
-  ): Promise<WranglerJson> {
-    // Default path is wrangler.json in current directory
-    const filePath = props.path || "wrangler.jsonc";
+export async function WranglerJson(
+  props: WranglerJsonProps,
+): Promise<WranglerJson> {
+  const cwd = props.worker.cwd ? path.resolve(props.worker.cwd) : process.cwd();
 
-    if (this.phase === "delete") {
-      return this.destroy();
-    }
+  const toAbsolute = <T extends string | undefined>(input: T): T => {
+    return (input ? path.resolve(cwd, input) : undefined) as T;
+  };
 
-    if (props.worker.entrypoint === undefined) {
-      throw new Error(
-        "Worker must have an entrypoint to generate a wrangler.json",
-      );
-    }
+  const main = toAbsolute(props.main ?? props.worker.entrypoint);
+  let filePath = toAbsolute(props.path ?? cwd);
+  if (!path.basename(filePath).match(".json")) {
+    filePath = path.join(filePath, props.name ?? "wrangler.jsonc");
+  }
 
-    const worker = props.worker;
+  const dirname = path.dirname(filePath);
 
-    const spec: WranglerJsonSpec = {
-      name: worker.name,
-      // Use entrypoint as main if it exists
-      main: props.main ?? worker.entrypoint,
-      // see: https://developers.cloudflare.com/workers/configuration/compatibility-dates/
-      compatibility_date: worker.compatibilityDate,
-      compatibility_flags: props.worker.compatibilityFlags,
-    };
+  if (!main) {
+    throw new Error(
+      "Worker must have an entrypoint to generate a wrangler.json",
+    );
+  }
 
-    // Process bindings if they exist
-    if (worker.bindings) {
-      processBindings(spec, worker.bindings, worker.eventSources, worker.name);
-    }
+  const worker = props.worker;
 
-    // Add environment variables as vars
-    if (worker.env) {
-      spec.vars = { ...worker.env };
-    }
+  const spec: WranglerJsonSpec = {
+    name: worker.name,
+    // Use entrypoint as main if it exists
+    main: path.relative(dirname, main),
+    // see: https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+    compatibility_date: worker.compatibilityDate,
+    compatibility_flags: props.worker.compatibilityFlags,
+    assets: props.assets
+      ? {
+          directory: toAbsolute(props.assets.directory),
+          binding: props.assets.binding,
+          not_found_handling: props.worker.assets?.not_found_handling,
+          html_handling: props.worker.assets?.html_handling,
+          run_worker_first: props.worker.assets?.run_worker_first,
+        }
+      : undefined,
+    placement: worker.placement,
+    limits: worker.limits,
+  };
 
-    await StaticJsonFile(filePath, spec);
-
-    // Return the resource
-    return this({
-      ...props,
-      path: filePath,
+  // Process bindings if they exist
+  if (worker.bindings) {
+    processBindings(
       spec,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-  },
-);
+      worker.bindings,
+      worker.eventSources,
+      worker.name,
+      cwd,
+      props.secrets ?? false,
+      Scope.current.local && !props.worker.dev?.remote,
+    );
+  }
+
+  // Add environment variables as vars
+  if (worker.env) {
+    spec.vars = { ...worker.env };
+  }
+
+  if (worker.crons && worker.crons.length > 0) {
+    spec.triggers = { crons: worker.crons };
+  }
+
+  if (spec.assets) {
+    spec.assets.directory = path.relative(dirname, spec.assets.directory);
+  }
+
+  // Apply the wrangler configuration hook as the final transformation
+  const finalSpec = props.transform?.wrangler
+    ? await props.transform.wrangler(spec)
+    : spec;
+
+  await fs.mkdir(dirname, { recursive: true });
+  if (props.secrets) {
+    // If secrets are enabled, decrypt them in the wrangler.json file,
+    // but do not modify `finalSpec` so that way secrets aren't written to state unencrypted.
+    const withSecretsUnwrapped = {
+      ...finalSpec,
+      vars: {
+        ...finalSpec.vars,
+        ...Object.fromEntries(
+          Object.entries(finalSpec.vars ?? {}).map(([key, value]) =>
+            isSecret(value) ? [key, value.unencrypted] : [key, value],
+          ),
+        ),
+      },
+    };
+    await writeJSON(filePath, withSecretsUnwrapped);
+  } else {
+    await writeJSON(filePath, finalSpec);
+  }
+
+  return {
+    ...props,
+    path: path.relative(cwd, filePath),
+    spec: finalSpec,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+const writeJSON = async (filePath: string, content: any) => {
+  await fs.writeFile(filePath, `${JSON.stringify(content, null, 2)}\n`);
+};
 
 /**
  * Wrangler.json configuration specification based on Cloudflare's schema
@@ -141,6 +253,20 @@ export interface WranglerJsonSpec {
   compatibility_flags?: string[];
 
   /**
+   * The placement mode for the worker
+   */
+  placement?: {
+    mode: "smart";
+  };
+
+  /**
+   * The CPU time limit for the worker
+   */
+  limits?: {
+    cpu_ms?: number;
+  };
+
+  /**
    * Whether to enable a workers.dev URL for this worker
    */
   workers_dev?: boolean;
@@ -151,10 +277,18 @@ export interface WranglerJsonSpec {
   routes?: string[];
 
   /**
+   * Scheduled triggers for the worker
+   */
+  triggers?: {
+    crons: string[];
+  };
+
+  /**
    * AI bindings
    */
   ai?: {
     binding: string;
+    experimental_remote?: boolean;
   };
 
   /**
@@ -162,6 +296,15 @@ export interface WranglerJsonSpec {
    */
   browser?: {
     binding: string;
+    experimental_remote?: boolean;
+  };
+
+  /**
+   * Images bindings
+   */
+  images?: {
+    binding: string;
+    experimental_remote?: boolean;
   };
 
   /**
@@ -174,6 +317,7 @@ export interface WranglerJsonSpec {
      * The ID of the KV namespace used during `wrangler dev`
      */
     preview_id?: string;
+    experimental_remote?: boolean;
   }[];
 
   /**
@@ -198,14 +342,15 @@ export interface WranglerJsonSpec {
      * The preview name of this R2 bucket at the edge.
      */
     preview_bucket_name?: string;
+    experimental_remote?: boolean;
   }[];
 
   /**
    * Queue bindings
    */
   queues?: {
-    producers: { queue: string; binding: string }[];
-    consumers: {
+    producers?: { queue: string; binding: string }[];
+    consumers?: {
       queue: string;
       max_batch_size?: number;
       max_concurrency?: number;
@@ -222,6 +367,7 @@ export interface WranglerJsonSpec {
     binding: string;
     service: string;
     environment?: string;
+    entrypoint?: string;
   }[];
 
   /**
@@ -231,14 +377,16 @@ export interface WranglerJsonSpec {
     name: string;
     binding: string;
     class_name: string;
+    script_name?: string;
   }[];
 
   /**
    * Vectorize index bindings
    */
-  vectorize_indexes?: {
+  vectorize?: {
     binding: string;
     index_name: string;
+    experimental_remote?: boolean;
   }[];
 
   /**
@@ -258,6 +406,7 @@ export interface WranglerJsonSpec {
      * The ID of the D1 database used during `wrangler dev`
      */
     preview_database_id?: string;
+    experimental_remote?: boolean;
   }[];
 
   /**
@@ -266,6 +415,13 @@ export interface WranglerJsonSpec {
   assets?: {
     directory: string;
     binding: string;
+    not_found_handling?: "none" | "404-page" | "single-page-application";
+    html_handling?:
+      | "auto-trailing-slash"
+      | "drop-trailing-slash"
+      | "force-trailing-slash"
+      | "none";
+    run_worker_first?: boolean | string[];
   };
 
   /**
@@ -291,6 +447,57 @@ export interface WranglerJsonSpec {
    * Whether to minify the worker script
    */
   minify?: boolean;
+
+  /**
+   * Analytics Engine datasets
+   */
+  analytics_engine_datasets?: { binding: string; dataset: string }[];
+
+  /**
+   * Hyperdrive bindings
+   */
+  hyperdrive?: {
+    binding: string;
+    id: string;
+    localConnectionString?: string;
+  }[];
+
+  /**
+   * Pipelines
+   */
+  pipelines?: { binding: string; pipeline: string }[];
+
+  /**
+   * Secrets Store bindings
+   */
+  secrets_store_secrets?: {
+    binding: string;
+    store_id: string;
+    secret_name: string;
+  }[];
+
+  /**
+   * Version metadata bindings
+   */
+  version_metadata?: {
+    binding: string;
+  };
+
+  /**
+   * Dispatch namespace bindings
+   */
+  dispatch_namespaces?: {
+    binding: string;
+    namespace: string;
+    experimental_remote?: boolean;
+  }[];
+
+  /**
+   * Unsafe bindings section for experimental features
+   */
+  unsafe?: {
+    bindings: WranglerJsonRateLimit[];
+  };
 }
 
 /**
@@ -301,25 +508,49 @@ function processBindings(
   bindings: Bindings,
   eventSources: EventSource[] | undefined,
   workerName: string,
+  workerCwd: string,
+  writeSecrets: boolean,
+  local: boolean,
 ): void {
   // Arrays to collect different binding types
-  const kvNamespaces: { binding: string; id: string }[] = [];
+  const kvNamespaces: {
+    binding: string;
+    id: string;
+    preview_id: string;
+    experimental_remote?: boolean;
+  }[] = [];
   const durableObjects: {
     name: string;
     class_name: string;
     script_name?: string;
     environment?: string;
   }[] = [];
-  const r2Buckets: { binding: string; bucket_name: string }[] = [];
-  const services: { binding: string; service: string; environment?: string }[] =
-    [];
+  const r2Buckets: {
+    binding: string;
+    bucket_name: string;
+    preview_bucket_name: string;
+    jurisdiction?: R2BucketJurisdiction;
+  }[] = [];
+  const services: {
+    binding: string;
+    service: string;
+    environment?: string;
+    entrypoint?: string;
+  }[] = [];
   const secrets: string[] = [];
-  const workflows: { name: string; binding: string; class_name: string }[] = [];
+  const workflows: {
+    name: string;
+    binding: string;
+    class_name: string;
+    script_name?: string;
+  }[] = [];
   const d1Databases: {
     binding: string;
     database_id: string;
     database_name: string;
     migrations_dir?: string;
+    preview_database_id: string;
+    experimental_remote?: boolean;
   }[] = [];
   const queues: {
     producers: { queue: string; binding: string }[];
@@ -339,12 +570,37 @@ function processBindings(
   const new_sqlite_classes: string[] = [];
   const new_classes: string[] = [];
 
-  const vectorizeIndexes: { binding: string; index_name: string }[] = [];
+  const vectorizeIndexes: {
+    binding: string;
+    index_name: string;
+    experimental_remote?: boolean;
+  }[] = [];
+  const analyticsEngineDatasets: { binding: string; dataset: string }[] = [];
+  const hyperdrive: {
+    binding: string;
+    id: string;
+    localConnectionString?: string;
+  }[] = [];
+  const pipelines: { binding: string; pipeline: string }[] = [];
+  const secretsStoreSecrets: {
+    binding: string;
+    store_id: string;
+    secret_name: string;
+  }[] = [];
+  const dispatchNamespaces: {
+    binding: string;
+    namespace: string;
+    experimental_remote?: boolean;
+  }[] = [];
+  const unsafeBindings: WranglerJsonRateLimit[] = [];
+  const containers: {
+    class_name: string;
+  }[] = [];
 
   for (const eventSource of eventSources ?? []) {
     if (isQueueEventSource(eventSource)) {
       queues.consumers.push({
-        queue: eventSource.queue.id,
+        queue: eventSource.queue.name,
         max_batch_size: eventSource.settings?.batchSize,
         max_concurrency: eventSource.settings?.maxConcurrency,
         max_retries: eventSource.settings?.maxRetries,
@@ -353,35 +609,53 @@ function processBindings(
       });
     } else if (isQueue(eventSource)) {
       queues.consumers.push({
-        queue: eventSource.id,
+        queue: eventSource.name,
       });
     }
   }
   // Process each binding
   for (const [bindingName, binding] of Object.entries(bindings)) {
+    if (typeof binding === "function") {
+      // this is only reachable in the
+      throw new Error(`Invalid binding ${bindingName} is a function`);
+    }
     if (typeof binding === "string") {
       // Plain text binding - add to vars
-      if (!spec.vars) {
-        spec.vars = {};
-      }
+      spec.vars ??= {};
       spec.vars[bindingName] = binding;
-    } else if (binding === Self) {
+    } else if (writeSecrets && isSecret(binding)) {
+      spec.vars ??= {};
+      spec.vars[bindingName] = binding as any;
+    } else if (binding.type === "cloudflare::Worker::Self") {
       // Self(service) binding
       services.push({
         binding: bindingName,
         service: workerName,
+        entrypoint: binding.__entrypoint__,
       });
     } else if (binding.type === "service") {
       // Service binding
       services.push({
         binding: bindingName,
-        service: binding.id,
+        service: "name" in binding ? binding.name : binding.service,
+        entrypoint:
+          "__entrypoint__" in binding ? binding.__entrypoint__ : undefined,
       });
     } else if (binding.type === "kv_namespace") {
       // KV Namespace binding
+      const id =
+        "dev" in binding && !binding.dev?.remote && local
+          ? binding.dev.id
+          : "namespaceId" in binding
+            ? binding.namespaceId
+            : binding.id;
       kvNamespaces.push({
         binding: bindingName,
-        id: "namespaceId" in binding ? binding.namespaceId : binding.id,
+        id: id,
+        preview_id: id,
+        ...("dev" in binding && binding.dev?.remote
+          ? { experimental_remote: true }
+          : {}),
       });
     } else if (
       typeof binding === "object" &&
@@ -401,16 +675,24 @@ function processBindings(
         new_classes.push(doBinding.className);
       }
     } else if (binding.type === "r2_bucket") {
+      const name =
+        "dev" in binding && !binding.dev?.remote && local
+          ? binding.dev.id
+          : binding.name;
       r2Buckets.push({
         binding: bindingName,
-        bucket_name: binding.name,
+        bucket_name: name,
+        preview_bucket_name: name,
+        jurisdiction:
+          binding.jurisdiction === "default" ? undefined : binding.jurisdiction,
+        ...(binding.dev?.remote ? { experimental_remote: true } : {}),
       });
     } else if (binding.type === "secret") {
       // Secret binding
       secrets.push(bindingName);
     } else if (binding.type === "assets") {
       spec.assets = {
-        directory: binding.path,
+        directory: path.resolve(workerCwd, binding.path),
         binding: bindingName,
       };
     } else if (binding.type === "workflow") {
@@ -418,23 +700,36 @@ function processBindings(
         name: binding.workflowName,
         binding: bindingName,
         class_name: binding.className,
+        script_name: binding.scriptName,
       });
     } else if (binding.type === "d1") {
+      const id =
+        "dev" in binding && !binding.dev?.remote && local
+          ? binding.dev.id
+          : binding.id;
       d1Databases.push({
         binding: bindingName,
-        database_id: binding.id,
+        database_id: id,
         database_name: binding.name,
         migrations_dir: binding.migrationsDir,
+        preview_database_id: id,
+        ...(binding.dev?.remote ? { experimental_remote: true } : {}),
       });
     } else if (binding.type === "queue") {
+      const id =
+        "dev" in binding && !binding.dev?.remote && local
+          ? binding.dev.id
+          : binding.id;
       queues.producers.push({
         binding: bindingName,
-        queue: binding.name,
+        queue: id,
       });
     } else if (binding.type === "vectorize") {
       vectorizeIndexes.push({
         binding: bindingName,
         index_name: binding.name,
+        // https://developers.cloudflare.com/workers/development-testing/#recommended-remote-bindings
+        experimental_remote: true,
       });
     } else if (binding.type === "browser") {
       if (spec.browser) {
@@ -442,6 +737,8 @@ function processBindings(
       }
       spec.browser = {
         binding: bindingName,
+        // https://developers.cloudflare.com/workers/development-testing/#recommended-remote-bindings
+        experimental_remote: true,
       };
     } else if (binding.type === "ai") {
       if (spec.ai) {
@@ -449,7 +746,81 @@ function processBindings(
       }
       spec.ai = {
         binding: bindingName,
+        // https://developers.cloudflare.com/workers/development-testing/#recommended-remote-bindings
+        experimental_remote: true,
       };
+    } else if (binding.type === "images") {
+      if (spec.images) {
+        throw new Error(`Images already bound to ${spec.images.binding}`);
+      }
+      spec.images = {
+        binding: bindingName,
+        // https://developers.cloudflare.com/workers/development-testing/#recommended-remote-bindings
+        experimental_remote: true,
+      };
+    } else if (binding.type === "analytics_engine") {
+      analyticsEngineDatasets.push({
+        binding: bindingName,
+        dataset: binding.dataset,
+      });
+    } else if (binding.type === "version_metadata") {
+      if (spec.version_metadata) {
+        throw new Error(
+          `Version metadata already bound to ${spec.version_metadata.binding}`,
+        );
+      }
+      spec.version_metadata = {
+        binding: bindingName,
+      };
+    } else if (binding.type === "hyperdrive") {
+      hyperdrive.push({
+        binding: bindingName,
+        id: binding.hyperdriveId,
+        localConnectionString: writeSecrets
+          ? binding.dev?.origin.unencrypted
+          : undefined,
+      });
+    } else if (binding.type === "pipeline") {
+      pipelines.push({
+        binding: bindingName,
+        pipeline: binding.name,
+      });
+    } else if (binding.type === "json") {
+      // TODO(sam): anything to do here? not sure wrangler.json supports this
+    } else if (binding.type === "secrets_store_secret") {
+      secretsStoreSecrets.push({
+        binding: bindingName,
+        store_id: binding.storeId,
+        secret_name: binding.name,
+      });
+    } else if (binding.type === "dispatch_namespace") {
+      dispatchNamespaces.push({
+        binding: bindingName,
+        namespace: binding.namespaceName,
+        experimental_remote: true,
+      });
+    } else if (binding.type === "ratelimit") {
+      unsafeBindings.push({
+        name: bindingName,
+        type: "rate_limit",
+        namespace_id: binding.namespace_id.toString(),
+        simple: binding.simple,
+      });
+    } else if (binding.type === "secret_key") {
+      // no-op
+    } else if (binding.type === "container") {
+      durableObjects.push({
+        name: bindingName,
+        class_name: binding.className,
+        script_name: binding.scriptName,
+      });
+      containers.push({
+        class_name: binding.className,
+      });
+    } else {
+      console.log("binding", binding);
+      // biome-ignore lint/correctness/noVoidTypeReturn: it returns never
+      return assertNever(binding);
     }
   }
 
@@ -477,11 +848,14 @@ function processBindings(
   }
 
   if (queues.consumers.length > 0) {
-    spec.queues = queues;
+    (spec.queues ??= {}).consumers = queues.consumers;
+  }
+  if (queues.producers.length > 0) {
+    (spec.queues ??= {}).producers = queues.producers;
   }
 
   if (vectorizeIndexes.length > 0) {
-    spec.vectorize_indexes = vectorizeIndexes;
+    spec.vectorize = vectorizeIndexes;
   }
 
   if (new_sqlite_classes.length > 0 || new_classes.length > 0) {
@@ -496,5 +870,31 @@ function processBindings(
 
   if (workflows.length > 0) {
     spec.workflows = workflows;
+  }
+
+  if (analyticsEngineDatasets.length > 0) {
+    spec.analytics_engine_datasets = analyticsEngineDatasets;
+  }
+
+  if (hyperdrive.length > 0) {
+    spec.hyperdrive = hyperdrive;
+  }
+
+  if (pipelines.length > 0) {
+    spec.pipelines = pipelines;
+  }
+
+  if (secretsStoreSecrets.length > 0) {
+    spec.secrets_store_secrets = secretsStoreSecrets;
+  }
+
+  if (dispatchNamespaces.length > 0) {
+    spec.dispatch_namespaces = dispatchNamespaces;
+  }
+
+  if (unsafeBindings.length > 0) {
+    spec.unsafe = {
+      bindings: unsafeBindings,
+    };
   }
 }

@@ -1,44 +1,49 @@
+import alchemy, { type } from "alchemy";
 import {
   DurableObjectNamespace,
   Queue,
   R2Bucket,
-  R2RestStateStore,
   Worker,
   Workflow,
-  WranglerJson,
-} from "../../alchemy/src/cloudflare/index.js";
-import alchemy from "../../alchemy/src/index.js";
+} from "alchemy/cloudflare";
+import type { HelloWorldDO } from "./src/do.ts";
+import type MyRPC from "./src/rpc.ts";
 
-const BRANCH_PREFIX = process.env.BRANCH_PREFIX ?? "";
-const app = await alchemy("cloudflare-worker", {
-  phase: process.argv.includes("--destroy") ? "destroy" : "up",
-  stateStore:
-    process.env.ALCHEMY_STATE_STORE === "cloudflare"
-      ? (scope) => new R2RestStateStore(scope)
-      : undefined,
-});
+const app = await alchemy("cloudflare-worker");
 
 export const queue = await Queue<{
   name: string;
   email: string;
-}>(`cloudflare-worker-queue${BRANCH_PREFIX}`);
+}>("queue", {
+  name: `${app.name}-${app.stage}-queue`,
+  adopt: true,
+});
 
-export const worker = await Worker(`cloudflare-worker-worker${BRANCH_PREFIX}`, {
+export const rpc = await Worker("rpc", {
+  name: `${app.name}-${app.stage}-rpc`,
+  entrypoint: "./src/rpc.ts",
+  rpc: type<MyRPC>,
+  adopt: true,
+});
+
+export const worker = await Worker("worker", {
+  name: `${app.name}-${app.stage}-worker`,
   entrypoint: "./src/worker.ts",
   bindings: {
-    BUCKET: await R2Bucket(`cloudflare-worker-bucket${BRANCH_PREFIX}`, {
-      // so that CI is idempotent
+    BUCKET: await R2Bucket("bucket", {
+      name: `${app.name}-${app.stage}-bucket`,
       adopt: true,
     }),
     QUEUE: queue,
-    WORKFLOW: new Workflow("OFACWorkflow", {
+    WORKFLOW: Workflow("OFACWorkflow", {
       className: "OFACWorkflow",
       workflowName: "ofac-workflow",
     }),
-    DO: new DurableObjectNamespace("HelloWorldDO", {
+    DO: DurableObjectNamespace<HelloWorldDO>("HelloWorldDO", {
       className: "HelloWorldDO",
       sqlite: true,
     }),
+    RPC: rpc,
   },
   url: true,
   eventSources: [queue],
@@ -47,10 +52,7 @@ export const worker = await Worker(`cloudflare-worker-worker${BRANCH_PREFIX}`, {
     format: "esm",
     target: "es2020",
   },
-});
-
-await WranglerJson("wrangler.jsonc", {
-  worker,
+  adopt: true,
 });
 
 console.log(worker.url);

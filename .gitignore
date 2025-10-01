@@ -11,4 +11,22 @@ lib/
 # examples/*/.alchemy
 
 .repomix-output.txt
-alchemy-web/public/og-images/
+wrangler.jsonc
+
+# Husky - ignore generated files but keep hooks
+.husky/_
+!.husky/pre-commit
+
+.smoke
+.smoke.logs
+smoke
+.svelte-kit
+.claude/*.local.json
+.astro
+.wrangler
+
+*.tgz
+.cursorindexingignore
+.specstory/
+# SpecStory explanation file
+.specstory/.what-is-this.md

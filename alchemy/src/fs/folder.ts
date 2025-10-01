@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { ignore } from "../util/ignore.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { ignore } from "../util/ignore.ts";
 
 export interface FolderProps {
   /**
@@ -30,7 +30,7 @@ export interface FolderProps {
 /**
  * Base folder resource type
  */
-export interface Folder extends Resource<"fs::Folder"> {
+export interface Folder {
   path: string;
 }
 
@@ -76,8 +76,8 @@ export const Folder = Resource(
     await ignore("EEXIST", async () =>
       fs.promises.mkdir(dirPath, { recursive: props?.recursive ?? true }),
     );
-    return this({
+    return {
       path: dirPath,
-    });
+    };
   },
 );

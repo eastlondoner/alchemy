@@ -1,16 +1,18 @@
-import { describe, expect } from "bun:test";
-import { alchemy } from "../../src/alchemy.js";
-import { AiGateway } from "../../src/cloudflare/ai-gateway.js";
-import { createCloudflareApi } from "../../src/cloudflare/api.js";
-import { destroy } from "../../src/destroy.js";
-import { BRANCH_PREFIX } from "../util.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { AiGateway } from "../../src/cloudflare/ai-gateway.ts";
+import { createCloudflareApi } from "../../src/cloudflare/api.ts";
+import { destroy } from "../../src/destroy.ts";
+import { BRANCH_PREFIX } from "../util.ts";
 // must import this or else alchemy.test won't exist
-import "../../src/test/bun.js";
+import "../../src/test/vitest.ts";
 
 // Create API client for verification
 const api = await createCloudflareApi();
 
-const test = alchemy.test(import.meta);
+const test = alchemy.test(import.meta, {
+  prefix: BRANCH_PREFIX,
+});
 
 describe("AiGateway Resource", () => {
   // Use BRANCH_PREFIX for deterministic, non-colliding resource names
@@ -21,6 +23,7 @@ describe("AiGateway Resource", () => {
     try {
       // Create a test AI Gateway with basic settings
       gateway = await AiGateway(testId, {
+        gatewayName: testId,
         collectLogs: true,
         cacheTtl: 0,
         rateLimitingTechnique: "fixed",
@@ -37,12 +40,13 @@ describe("AiGateway Resource", () => {
       );
       expect(getResponse.status).toEqual(200);
 
-      const responseData = await getResponse.json();
+      const responseData: any = await getResponse.json();
       expect(responseData.result.id).toEqual(testId);
       expect(responseData.result.collect_logs).toEqual(true);
 
       // Update the gateway
       gateway = await AiGateway(testId, {
+        gatewayName: testId,
         collectLogs: true,
         cacheTtl: 60,
         rateLimitingTechnique: "sliding",
@@ -60,16 +64,12 @@ describe("AiGateway Resource", () => {
       const getUpdatedResponse = await api.get(
         `/accounts/${api.accountId}/ai-gateway/gateways/${testId}`,
       );
-      const updatedData = await getUpdatedResponse.json();
+      const updatedData: any = await getUpdatedResponse.json();
       expect(updatedData.result.id).toEqual(testId);
       expect(updatedData.result.cache_ttl).toEqual(60);
       expect(updatedData.result.rate_limiting_technique).toEqual("sliding");
       expect(updatedData.result.rate_limiting_interval).toEqual(60);
       expect(updatedData.result.rate_limiting_limit).toEqual(100);
-    } catch (err) {
-      // log the error or else it's silently swallowed by destroy errors
-      console.log(err);
-      throw err;
     } finally {
       // Always clean up, even if test assertions fail
       await destroy(scope);
@@ -87,6 +87,7 @@ describe("AiGateway Resource", () => {
     try {
       // Create a test AI Gateway with authentication and logging
       gateway = await AiGateway(`${testId}-auth`, {
+        gatewayName: `${testId}-auth`,
         collectLogs: true,
         authentication: true,
         logManagement: 10000,
@@ -104,7 +105,7 @@ describe("AiGateway Resource", () => {
       );
       expect(getResponse.status).toEqual(200);
 
-      const responseData = await getResponse.json();
+      const responseData: any = await getResponse.json();
       expect(responseData.result.authentication).toEqual(true);
       expect(responseData.result.log_management).toEqual(10000);
       expect(responseData.result.log_management_strategy).toEqual(
@@ -127,6 +128,7 @@ describe("AiGateway Resource", () => {
     try {
       // Create a test AI Gateway with rate limiting
       gateway = await AiGateway(`${testId}-ratelimit`, {
+        gatewayName: `${testId}-ratelimit`,
         rateLimitingInterval: 30,
         rateLimitingLimit: 50,
         rateLimitingTechnique: "sliding",
@@ -145,7 +147,7 @@ describe("AiGateway Resource", () => {
       );
       expect(getResponse.status).toEqual(200);
 
-      const responseData = await getResponse.json();
+      const responseData: any = await getResponse.json();
       expect(responseData.result.rate_limiting_interval).toEqual(30);
       expect(responseData.result.rate_limiting_limit).toEqual(50);
       expect(responseData.result.rate_limiting_technique).toEqual("sliding");

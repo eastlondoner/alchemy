@@ -1,16 +1,17 @@
-import { describe, expect } from "bun:test";
-import { alchemy } from "../../src/alchemy.js";
-import { createCloudflareApi } from "../../src/cloudflare/api.js";
-import { R2Bucket } from "../../src/cloudflare/bucket.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { createCloudflareApi } from "../../src/cloudflare/api.ts";
+import { R2Bucket } from "../../src/cloudflare/bucket.ts";
 import {
   Pipeline,
   type PipelineRecord,
-} from "../../src/cloudflare/pipeline.js";
-import { Worker } from "../../src/cloudflare/worker.js";
-import { destroy } from "../../src/destroy.js";
-import { BRANCH_PREFIX } from "../util.js";
+} from "../../src/cloudflare/pipeline.ts";
+import { Worker } from "../../src/cloudflare/worker.ts";
+import { destroy } from "../../src/destroy.ts";
+import { BRANCH_PREFIX } from "../util.ts";
 
-import "../../src/test/bun.js";
+import "../../src/test/vitest.ts";
+import { fetchAndExpectOK } from "../../src/util/safe-fetch.ts";
 
 const test = alchemy.test(import.meta, {
   prefix: BRANCH_PREFIX,
@@ -26,7 +27,7 @@ async function assertPipelineExists(pipelineName: string): Promise<boolean> {
       `/accounts/${api.accountId}/pipelines/${pipelineName}`,
     );
     return response.status === 200;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -38,14 +39,14 @@ async function assertWorkerDoesNotExist(workerName: string) {
       `/accounts/${api.accountId}/workers/scripts/${workerName}`,
     );
     expect(response.status).toEqual(404);
-  } catch (error) {
+  } catch {
     // 404 is expected, so we can ignore it
     return;
   }
 }
 
-const accessKeyId = await alchemy.secret.env("R2_ACCESS_KEY_ID");
-const secretAccessKey = await alchemy.secret.env("R2_SECRET_ACCESS_KEY");
+const accessKeyId = alchemy.secret.env("R2_ACCESS_KEY_ID");
+const secretAccessKey = alchemy.secret.env("R2_SECRET_ACCESS_KEY");
 
 describe("Pipeline Resource", () => {
   // Create mock secrets for testing - reuse these across tests
@@ -54,8 +55,8 @@ describe("Pipeline Resource", () => {
     const pipelineName = `${BRANCH_PREFIX}-test-pipeline`;
     const bucketName = `${BRANCH_PREFIX.toLowerCase()}-basic-bucket`;
 
-    let pipeline: Pipeline | undefined = undefined;
-    let bucket: R2Bucket | undefined = undefined;
+    let pipeline: Pipeline | undefined;
+    let bucket: R2Bucket | undefined;
 
     try {
       // Create an R2 bucket
@@ -68,6 +69,7 @@ describe("Pipeline Resource", () => {
       // Create a basic pipeline with R2 destination
       pipeline = await Pipeline(pipelineName, {
         name: pipelineName,
+        adopt: true,
         source: [
           {
             type: "http",
@@ -93,7 +95,7 @@ describe("Pipeline Resource", () => {
       expect(pipeline.id).toBeTruthy();
       expect(pipeline.name).toEqual(pipelineName);
       expect(pipeline.endpoint).toBeTruthy();
-      expect(pipeline.version).toBeNumber();
+      expect(pipeline.version).toBeTypeOf("number");
       expect(pipeline.type).toEqual("pipeline");
       expect(pipeline.destination).toBeDefined();
       expect(pipeline.destination.type).toEqual("r2");
@@ -116,8 +118,8 @@ describe("Pipeline Resource", () => {
     const bucketName = `${BRANCH_PREFIX.toLowerCase()}-pipeline-bucket`;
     const prefix = "test-logs";
 
-    let pipeline: Pipeline | undefined = undefined;
-    let bucket: R2Bucket | undefined = undefined;
+    let pipeline: Pipeline | undefined;
+    let bucket: R2Bucket | undefined;
 
     try {
       // Create an R2 bucket
@@ -130,6 +132,7 @@ describe("Pipeline Resource", () => {
       // Create a pipeline with the R2 bucket as destination and custom settings
       pipeline = await Pipeline(pipelineName, {
         name: pipelineName,
+        adopt: true,
         source: [
           {
             type: "http",
@@ -185,8 +188,8 @@ describe("Pipeline Resource", () => {
     const pipelineName = `${BRANCH_PREFIX}-update-pipeline`;
     const bucketName = `${BRANCH_PREFIX.toLowerCase()}-update-bucket`;
 
-    let pipeline: Pipeline | undefined = undefined;
-    let bucket: R2Bucket | undefined = undefined;
+    let pipeline: Pipeline | undefined;
+    let bucket: R2Bucket | undefined;
 
     try {
       // Create an R2 bucket
@@ -197,6 +200,7 @@ describe("Pipeline Resource", () => {
       // Create a pipeline with initial settings
       pipeline = await Pipeline(pipelineName, {
         name: pipelineName,
+        adopt: true,
         source: [
           {
             type: "http",
@@ -230,6 +234,7 @@ describe("Pipeline Resource", () => {
       // Update the pipeline with new settings
       pipeline = await Pipeline(pipelineName, {
         name: pipelineName,
+        adopt: true,
         source: [
           {
             type: "http",
@@ -331,17 +336,15 @@ describe("Pipeline Resource", () => {
       };
     `;
 
-    let pipeline: Pipeline<TestRecord> | undefined = undefined;
-    let bucket: R2Bucket | undefined = undefined;
-    let worker: Worker<{ DATA_PIPELINE: Pipeline<TestRecord> }> | undefined =
-      undefined;
+    let pipeline: Pipeline<TestRecord> | undefined;
+    let bucket: R2Bucket | undefined;
+    let worker: Worker<{ DATA_PIPELINE: Pipeline<TestRecord> }> | undefined;
 
     try {
       // Create an R2 bucket
       bucket = await R2Bucket("worker-bucket", {
         name: bucketName,
-        accessKey: accessKeyId,
-        secretAccessKey: secretAccessKey,
+        adopt: true,
         delete: true,
         empty: true,
       });
@@ -349,6 +352,7 @@ describe("Pipeline Resource", () => {
       // Create a pipeline with the R2 bucket as destination
       pipeline = await Pipeline(pipelineName, {
         name: pipelineName,
+        adopt: true,
         source: [
           {
             type: "binding",
@@ -381,6 +385,7 @@ describe("Pipeline Resource", () => {
       // Create a worker with the pipeline binding
       worker = await Worker(workerName, {
         name: workerName,
+        adopt: true,
         script: pipelineWorkerScript,
         format: "esm",
         url: true, // Enable workers.dev URL to test the worker
@@ -419,27 +424,23 @@ describe("Pipeline Resource", () => {
         ];
 
         // Send records to the pipeline through the worker
-        const sendResponse = await fetch(`${worker.url}/send-record`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
+        const sendResponse = await fetchAndExpectOK(
+          `${worker.url}/send-record`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(testRecords),
           },
-          body: JSON.stringify(testRecords),
-        });
+        );
 
-        const responseData = await sendResponse.json();
-        console.log(responseData);
+        const responseData: any = await sendResponse.json();
 
         expect(sendResponse.status).toEqual(200);
         expect(responseData.success).toEqual(true);
         expect(responseData.message).toEqual("Records sent to pipeline");
         expect(responseData.count).toEqual(2);
-
-        // Note: We can't easily verify the records were written to R2 in a test
-        // because it might take time for the batching and delivery to complete.
-        // In a real application, you'd have monitoring or a way to query the destination.
-
-        console.log("Records sent to pipeline:", responseData);
       }
     } finally {
       // wait 10s for pipeline to flush

@@ -1,7 +1,16 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { handleApiError } from "./api-error.js";
-import { createCloudflareApi, type CloudflareApiOptions } from "./api.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { handleApiError } from "./api-error.ts";
+import {
+  createCloudflareApi,
+  type CloudflareApi,
+  type CloudflareApiOptions,
+} from "./api.ts";
+import {
+  updateBotManagement,
+  type BotManagement,
+} from "./zone-bot-management.ts";
 import type {
   AlwaysUseHTTPSValue,
   AutomaticHTTPSRewritesValue,
@@ -20,7 +29,7 @@ import type {
   UpdateZoneSettingParams,
   WebSocketsValue,
   ZeroRTTValue,
-} from "./zone-settings.js";
+} from "./zone-settings.ts";
 
 /**
  * Properties for creating or updating a Zone
@@ -69,7 +78,7 @@ export interface ZoneProps extends CloudflareApiOptions {
     /**
      * Enable Always Use HTTPS
      * Redirects all HTTP traffic to HTTPS
-     * @default "off"
+     * @default "on" (unless explicitly set to "off")
      */
     alwaysUseHttps?: AlwaysUseHTTPSValue;
 
@@ -162,12 +171,17 @@ export interface ZoneProps extends CloudflareApiOptions {
      */
     minTlsVersion?: MinTLSVersionValue;
   };
+
+  /**
+   * Cloudflare Bot Management settings
+   */
+  botManagement?: BotManagement;
 }
 
 /**
- * Output returned after Zone creation/update
+ * Zone data structure (used for lookup functions)
  */
-export interface Zone extends Resource<"cloudflare::Zone"> {
+export interface ZoneData {
   /**
    * The ID of the zone
    */
@@ -247,6 +261,11 @@ export interface Zone extends Resource<"cloudflare::Zone"> {
 }
 
 /**
+ * Output returned after Zone creation/update
+ */
+export interface Zone extends ZoneData {}
+
+/**
  * A Cloudflare Zone represents a domain and its configuration settings on Cloudflare.
  * Zones allow you to manage DNS, SSL/TLS, caching, security and other settings for a domain.
  *
@@ -304,8 +323,8 @@ export interface Zone extends Resource<"cloudflare::Zone"> {
 export const Zone = Resource(
   "cloudflare::Zone",
   async function (
-    this: Context<Zone>,
-    id: string,
+    this: Context<Zone, ZoneProps>,
+    _id: string,
     props: ZoneProps,
   ): Promise<Zone> {
     // Create Cloudflare API client with automatic account discovery
@@ -324,11 +343,12 @@ export const Zone = Resource(
           );
         }
       } else {
-        console.warn(`Zone '${props.name}' not found, skipping delete`);
+        logger.warn(`Zone '${props.name}' not found, skipping delete`);
       }
       return this.destroy();
     }
 
+    let zoneData: CloudflareZone;
     if (this.phase === "update" && this.output?.id) {
       // Get zone details to verify it exists
       const response = await api.get(`/zones/${this.output.id}`);
@@ -339,86 +359,73 @@ export const Zone = Resource(
         );
       }
 
-      const zoneData = ((await response.json()) as { result: CloudflareZone })
-        .result;
-
-      // Update zone settings if provided
-      if (props.settings) {
-        await updateZoneSettings(api, this.output.id, props.settings);
-        // Add a small delay to ensure settings are propagated
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-
-      return this({
-        id: zoneData.id,
-        name: zoneData.name,
-        type: zoneData.type,
-        status: zoneData.status,
-        paused: zoneData.paused,
-        accountId: zoneData.account.id,
-        nameservers: zoneData.name_servers,
-        originalNameservers: zoneData.original_name_servers,
-        createdAt: new Date(zoneData.created_on).getTime(),
-        modifiedAt: new Date(zoneData.modified_on).getTime(),
-        activatedAt: zoneData.activated_on
-          ? new Date(zoneData.activated_on).getTime()
-          : null,
-        settings: await getZoneSettings(api, zoneData.id),
-      });
-    }
-    // Create new zone
-
-    const response = await api.post("/zones", {
-      name: props.name,
-      type: props.type || "full",
-      jump_start: props.jumpStart !== false,
-      account: {
-        id: api.accountId,
-      },
-    });
-
-    const body = await response.text();
-    let zoneData;
-    if (!response.ok) {
-      if (response.status === 400 && body.includes("already exists")) {
-        // Zone already exists, fetch it instead
-        console.warn(
-          `Zone '${props.name}' already exists during Zone create, adopting it...`,
-        );
-        const getResponse = await api.get(`/zones?name=${props.name}`);
-
-        if (!getResponse.ok) {
-          throw new Error(
-            `Error fetching existing zone '${props.name}': ${getResponse.statusText}`,
-          );
-        }
-
-        const zones = (
-          (await getResponse.json()) as { result: CloudflareZone[] }
-        ).result;
-        if (zones.length === 0) {
-          throw new Error(
-            `Zone '${props.name}' does not exist, but the name is reserved for another user.`,
-          );
-        }
-        zoneData = zones[0];
-      } else {
-        throw new Error(
-          `Error creating zone '${props.name}': ${response.statusText}\n${body}`,
-        );
-      }
+      zoneData = ((await response.json()) as { result: CloudflareZone }).result;
     } else {
-      zoneData = (JSON.parse(body) as { result: CloudflareZone }).result;
+      const response = await api.post("/zones", {
+        name: props.name,
+        type: props.type || "full",
+        jump_start: props.jumpStart !== false,
+        account: {
+          id: api.accountId,
+        },
+      });
+
+      const body = await response.text();
+      if (!response.ok) {
+        if (response.status === 400 && body.includes("already exists")) {
+          // Zone already exists, fetch it instead
+          logger.warn(
+            `Zone '${props.name}' already exists during Zone create, adopting it...`,
+          );
+          const getResponse = await api.get(`/zones?name=${props.name}`);
+
+          if (!getResponse.ok) {
+            throw new Error(
+              `Error fetching existing zone '${props.name}': ${getResponse.statusText}`,
+            );
+          }
+
+          const zones = (
+            (await getResponse.json()) as { result: CloudflareZone[] }
+          ).result;
+          if (zones.length === 0) {
+            throw new Error(
+              `Zone '${props.name}' does not exist, but the name is reserved for another user.`,
+            );
+          }
+          zoneData = zones[0];
+        } else {
+          throw new Error(
+            `Error creating zone '${props.name}': ${response.statusText}\n${body}`,
+          );
+        }
+      } else {
+        zoneData = (JSON.parse(body) as { result: CloudflareZone }).result;
+      }
     }
 
-    // Update zone settings if provided
-    if (props.settings) {
-      await updateZoneSettings(api, zoneData.id, props.settings);
-      // Add a small delay to ensure settings are propagated
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    }
+    // Apply defaults to settings
+    const settingsToApply = {
+      ...props.settings,
+      alwaysUseHttps: props.settings?.alwaysUseHttps ?? "on",
+    };
 
-    return this({
+    await updateZoneSettings(api, zoneData.id, settingsToApply);
+
+    // Add a small delay to ensure settings are propagated
+    // TODO(michael): do we need this?
+    // https://github.com/sam-goodwin/alchemy/issues/681
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    // Update Bot Management configuration if provided
+    await updateBotManagement(
+      api,
+      zoneData.id,
+      props.botManagement,
+      this.props?.botManagement,
+    );
+
+    return {
       id: zoneData.id,
       name: zoneData.name,
       type: zoneData.type,
@@ -433,7 +440,7 @@ export const Zone = Resource(
         ? new Date(zoneData.activated_on).getTime()
         : null,
       settings: await getZoneSettings(api, zoneData.id),
-    });
+    };
   },
 );
 
@@ -441,7 +448,7 @@ export const Zone = Resource(
  * Helper function to update zone settings
  */
 async function updateZoneSettings(
-  api: any,
+  api: CloudflareApi,
   zoneId: string,
   settings: ZoneProps["settings"],
 ): Promise<void> {
@@ -483,7 +490,7 @@ async function updateZoneSettings(
         if (!response.ok) {
           const data = await response.text();
           if (response.status === 400 && data.includes("already enabled")) {
-            console.warn(`Warning: Setting '${key}' already enabled`);
+            logger.warn(`Warning: Setting '${key}' already enabled`);
             return;
           }
           throw new Error(
@@ -498,7 +505,7 @@ async function updateZoneSettings(
  * Helper function to get current zone settings
  */
 async function getZoneSettings(
-  api: any,
+  api: CloudflareApi,
   zoneId: string,
 ): Promise<Zone["settings"]> {
   const settingsResponse = await api.get(`/zones/${zoneId}/settings`);
@@ -540,6 +547,69 @@ async function getZoneSettings(
 }
 
 /**
+ * Look up a Cloudflare zone by domain name
+ *
+ * @param domainName The domain name to look up (e.g., "example.com")
+ * @param options Optional API configuration
+ * @returns Promise resolving to zone details or null if not found
+ *
+ * @example
+ * // Look up a zone by domain name
+ * const zone = await getZoneByDomain(api, "example.com");
+ * if (zone) {
+ *   console.log(`Zone ID: ${zone.id}`);
+ *   console.log(`Nameservers: ${zone.nameservers.join(", ")}`);
+ * }
+ *
+ * @example
+ * // Look up a zone with custom API options
+ * const zone = await getZoneByDomain(api, "example.com");
+ */
+export async function getZoneByDomain(
+  api: CloudflareApi,
+  domainName: string,
+): Promise<ZoneData | null> {
+  const response = await api.get(
+    `/zones?name=${encodeURIComponent(domainName)}`,
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Error fetching zone for '${domainName}': ${response.statusText}`,
+    );
+  }
+
+  const zones = ((await response.json()) as { result: CloudflareZone[] })
+    .result;
+
+  if (zones.length === 0) {
+    return null;
+  }
+
+  const zoneData = zones[0];
+
+  // Get zone settings
+  const settings = await getZoneSettings(api, zoneData.id);
+
+  return {
+    id: zoneData.id,
+    name: zoneData.name,
+    type: zoneData.type,
+    status: zoneData.status,
+    paused: zoneData.paused,
+    accountId: zoneData.account.id,
+    nameservers: zoneData.name_servers,
+    originalNameservers: zoneData.original_name_servers,
+    createdAt: new Date(zoneData.created_on).getTime(),
+    modifiedAt: new Date(zoneData.modified_on).getTime(),
+    activatedAt: zoneData.activated_on
+      ? new Date(zoneData.activated_on).getTime()
+      : null,
+    settings,
+  };
+}
+
+/**
  * Cloudflare Zone response format
  */
 export interface CloudflareZone {
@@ -556,4 +626,80 @@ export interface CloudflareZone {
   created_on: string;
   modified_on: string;
   activated_on: string | null;
+}
+
+/**
+ * Helper function to find zone ID from a hostname
+ * Searches for the zone that matches the hostname or its parent domains
+ *
+ * @param api CloudflareApi instance
+ * @param hostname The hostname to find the zone for
+ * @returns Promise resolving to the zone ID and zone name
+ */
+export async function findZoneForHostname(
+  api: CloudflareApi,
+  hostname: string,
+): Promise<{ zoneId: string; zoneName: string }> {
+  // Remove wildcard prefix if present
+  const cleanHostname = hostname.replace(/^\*\./, "");
+
+  // Helper to fetch a page of zones
+  const fetchZonePage = async (pageNum: number) => {
+    const response = await api.get(`/zones?per_page=50&page=${pageNum}`);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to list zones (page ${pageNum}): ${response.statusText}`,
+      );
+    }
+    return response.json() as Promise<{
+      result: Array<{ id: string; name: string }>;
+      result_info?: {
+        count?: number;
+        page?: number;
+        per_page?: number;
+        total_count?: number;
+        total_pages?: number;
+      };
+    }>;
+  };
+
+  // Fetch the first page to get total_pages
+  const firstPageData = await fetchZonePage(1);
+  const totalPages = firstPageData.result_info?.total_pages ?? 1;
+
+  // Fetch remaining pages concurrently if needed
+  const allZones =
+    totalPages > 1
+      ? await Promise.all([
+          Promise.resolve(firstPageData.result),
+          ...Array.from({ length: totalPages - 1 }, (_, i) =>
+            fetchZonePage(i + 2).then((data) => data.result),
+          ),
+        ]).then((results) => results.flat())
+      : firstPageData.result;
+
+  // Find the zone that best matches the hostname
+  // We look for the longest matching zone name (most specific)
+  let bestMatch: { zoneId: string; zoneName: string } | null = null;
+  let longestMatch = 0;
+
+  for (const zone of allZones) {
+    if (
+      cleanHostname === zone.name ||
+      cleanHostname.endsWith(`.${zone.name}`)
+    ) {
+      if (zone.name.length > longestMatch) {
+        longestMatch = zone.name.length;
+        bestMatch = { zoneId: zone.id, zoneName: zone.name };
+      }
+    }
+  }
+
+  if (!bestMatch) {
+    throw new Error(
+      `Could not find zone for hostname '${hostname}'. Available zones: ${allZones.map((z) => z.name).join(", ")}`,
+    );
+  }
+
+  return bestMatch;
 }

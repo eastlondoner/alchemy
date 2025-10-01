@@ -1,11 +1,11 @@
-import { describe, expect } from "bun:test";
-import { alchemy } from "../../src/alchemy.js";
-import { createCloudflareApi } from "../../src/cloudflare/api.js";
-import { Zone } from "../../src/cloudflare/zone.js";
-import { destroy } from "../../src/destroy.js";
-import { BRANCH_PREFIX } from "../util.js";
+import { describe, expect } from "vitest";
+import { alchemy } from "../../src/alchemy.ts";
+import { createCloudflareApi } from "../../src/cloudflare/api.ts";
+import { Zone, getZoneByDomain } from "../../src/cloudflare/zone.ts";
+import { destroy } from "../../src/destroy.ts";
+import { BRANCH_PREFIX } from "../util.ts";
 
-import "../../src/test/bun.js";
+import "../../src/test/vitest.ts";
 
 const api = await createCloudflareApi();
 
@@ -13,7 +13,7 @@ const test = alchemy.test(import.meta, {
   prefix: BRANCH_PREFIX,
 });
 
-describe("Zone Resource", () => {
+describe.skipIf(!process.env.ALL_TESTS)("Zone Resource", () => {
   // Use BRANCH_PREFIX for deterministic, non-colliding zone names
   const testDomain = `${BRANCH_PREFIX}-test.dev`;
 
@@ -46,6 +46,15 @@ describe("Zone Resource", () => {
           hotlinkProtection: "on",
           developmentMode: "off",
         },
+        botManagement: {
+          fightMode: true,
+          aiBotsProtection: "block",
+          crawlerProtection: "enabled",
+          enableJs: true,
+          isRobotsTxtManaged: true,
+          optimizeWordpress: false,
+          suppressSessionScore: false,
+        },
       });
 
       expect(zone.id).toBeTruthy();
@@ -76,8 +85,16 @@ describe("Zone Resource", () => {
       const getResponse = await api.get(`/zones/${zone.id}`);
       expect(getResponse.status).toEqual(200);
 
-      const responseData = await getResponse.json();
+      const responseData: any = await getResponse.json();
       expect(responseData.result.name).toEqual(testDomain);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Verify bot management settings
+      const botResponse = await api.get(`/zones/${zone.id}/bot_management`);
+      expect(botResponse.status).toEqual(200);
+      const botData: any = await botResponse.json();
+      console.log(botData);
+      expect(botData.result.fight_mode).toEqual(true);
 
       // Update the zone with different settings
       zone = await Zone(testDomain, {
@@ -117,7 +134,7 @@ describe("Zone Resource", () => {
 
       // Verify settings were updated in the API
       const settingsResponse = await api.get(`/zones/${zone.id}/settings`);
-      const settingsData = await settingsResponse.json();
+      const settingsData: any = await settingsResponse.json();
 
       // Helper function to find setting value
       const getSetting = (id: string) =>
@@ -138,10 +155,6 @@ describe("Zone Resource", () => {
       expect(getSetting("development_mode")).toEqual("on");
       expect(getSetting("ipv6")).toEqual("on");
       expect(getSetting("websockets")).toEqual("on");
-    } catch (err) {
-      // log the error or else it's silently swallowed by destroy errors
-      console.log(err);
-      throw err;
     } finally {
       // Always clean up, even if test assertions fail
       await destroy(scope);
@@ -151,6 +164,57 @@ describe("Zone Resource", () => {
         const text = await getDeletedResponse.text();
         expect(text).toContain("Invalid zone identifier");
         // seriously, wtf, why 400?
+        expect(getDeletedResponse.status).toEqual(400);
+      }
+    }
+  });
+
+  test("getZoneByDomain lookup function", async (scope) => {
+    const lookupTestDomain = `${BRANCH_PREFIX}-lookup-test.dev`;
+    let zone: Zone | undefined;
+
+    try {
+      // Create a test zone
+      zone = await Zone(lookupTestDomain, {
+        name: lookupTestDomain,
+        type: "full",
+        jumpStart: false,
+        settings: {
+          ssl: "flexible",
+          alwaysUseHttps: "on",
+        },
+      });
+
+      expect(zone.id).toBeTruthy();
+      expect(zone.name).toEqual(lookupTestDomain);
+
+      // Use getZoneByDomain to look up the zone we just created
+      const foundZone = await getZoneByDomain(api, lookupTestDomain);
+
+      // Verify the lookup returned the correct zone
+      expect(foundZone).toBeTruthy();
+      expect(foundZone!.id).toEqual(zone.id);
+      expect(foundZone!.name).toEqual(lookupTestDomain);
+      expect(foundZone!.type).toEqual("full");
+      expect(foundZone!.accountId).toEqual(zone.accountId);
+      expect(foundZone!.nameservers).toEqual(zone.nameservers);
+      expect(foundZone!.settings.ssl).toEqual("flexible");
+      expect(foundZone!.settings.alwaysUseHttps).toEqual("on");
+
+      // Test lookup of non-existent domain
+      const nonExistentZone = await getZoneByDomain(
+        api,
+        `${BRANCH_PREFIX}-non-existent.dev`,
+      );
+      expect(nonExistentZone).toBeNull();
+    } finally {
+      // Always clean up
+      await destroy(scope);
+
+      if (zone) {
+        const getDeletedResponse = await api.get(`/zones/${zone.id}`);
+        const text = await getDeletedResponse.text();
+        expect(text).toContain("Invalid zone identifier");
         expect(getDeletedResponse.status).toEqual(400);
       }
     }

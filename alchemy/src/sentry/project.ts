@@ -1,7 +1,8 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { SentryApi } from "./api.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { SentryApi } from "./api.ts";
 
 /**
  * Properties for creating or updating a Project
@@ -9,8 +10,10 @@ import { SentryApi } from "./api.js";
 export interface ProjectProps {
   /**
    * The name for the project
+   *
+   * @default ${app}-${stage}-${id}
    */
-  name: string;
+  name?: string;
 
   /**
    * Uniquely identifies a project and is used for the interface
@@ -54,13 +57,16 @@ export interface ProjectProps {
 /**
  * Output returned after Project creation/update
  */
-export interface Project
-  extends Omit<Resource<"sentry::Project">, "team">,
-    Omit<ProjectProps, "team"> {
+export interface Project extends Omit<ProjectProps, "team"> {
   /**
    * The ID of the project
    */
   id: string;
+
+  /**
+   * The name for the project
+   */
+  name: string;
 
   /**
    * The team that owns the project
@@ -286,6 +292,38 @@ export const Project = Resource(
   ): Promise<Project> {
     const api = new SentryApi({ authToken: props.authToken });
 
+    // it's possible that `this.output.name` is undefined because a previous version
+    // of alchemy had a bug where it didn't set the name on the output
+    // so, we try to find the key by ID and use the name from the API response
+    const lookupName = async () => {
+      if (!this.output) {
+        return undefined;
+      } else if (this.output.name) {
+        return this.output.name;
+      }
+      const name = await getProjectName(
+        api,
+        props.organization,
+        this.output.id,
+      );
+      if (name) {
+        this.output.name = name;
+      }
+      return name;
+    };
+
+    const projectName =
+      props.name ?? (await lookupName()) ?? this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output.name !== projectName) {
+      await api.put(
+        `/projects/${props.organization}/${this.output.slug || this.output.id}/`,
+        {
+          name: projectName,
+        },
+      );
+    }
+
     if (this.phase === "delete") {
       try {
         if (this.output?.id) {
@@ -293,11 +331,11 @@ export const Project = Resource(
             `/projects/${props.organization}/${this.output.slug || this.output.id}/`,
           );
           if (!response.ok && response.status !== 404) {
-            console.error("Error deleting project:", response.statusText);
+            logger.error("Error deleting project:", response.statusText);
           }
         }
       } catch (error) {
-        console.error("Error deleting project:", error);
+        logger.error("Error deleting project:", error);
       }
       return this.destroy();
     } else {
@@ -318,22 +356,22 @@ export const Project = Resource(
           } catch (error) {
             // Check if this is a "project already exists" error and adopt is enabled
             if (
-              props.adopt &&
+              (props.adopt ?? this.scope.adopt) &&
               error instanceof Error &&
               error.message.includes("already exists")
             ) {
-              console.log(
-                `Project '${props.slug || props.name}' already exists, adopting it`,
+              logger.log(
+                `Project '${props.slug || projectName}' already exists, adopting it`,
               );
               // Find the existing project by slug
               const existingProject = await findProjectBySlug(
                 api,
                 props.organization,
-                props.slug || props.name,
+                props.slug || projectName,
               );
               if (!existingProject) {
                 throw new Error(
-                  `Failed to find existing project '${props.slug || props.name}' for adoption`,
+                  `Failed to find existing project '${props.slug || projectName}' for adoption`,
                 );
               }
               response = await api.get(
@@ -346,16 +384,17 @@ export const Project = Resource(
         }
 
         if (!response.ok) {
-          throw new Error(`API error: ${response.statusText}`);
+          throw new Error(`API error: ${await response.text()}`);
         }
 
         const data = (await response.json()) as Omit<
           Project,
           keyof ProjectProps
         > & { team: Project["team"] };
-        return this({
+        return {
           ...props,
           id: data.id,
+          name: projectName,
           team: data.team,
           teams: data.teams,
           isBookmarked: data.isBookmarked,
@@ -389,9 +428,9 @@ export const Project = Resource(
           latestRelease: data.latestRelease,
           hasUserReports: data.hasUserReports,
           latestDeploys: data.latestDeploys,
-        });
+        } satisfies Project;
       } catch (error) {
-        console.error("Error creating/updating project:", error);
+        logger.error("Error creating/updating project:", error);
         throw error;
       }
     }
@@ -417,4 +456,17 @@ async function findProjectBySlug(
   }>;
   const project = projects.find((p) => p.slug === slug);
   return project ? { id: project.id, slug: project.slug } : null;
+}
+
+async function getProjectName(
+  api: SentryApi,
+  organization: string,
+  slug: string,
+): Promise<string | undefined> {
+  const response = await api.get(`/projects/${organization}/${slug}/`);
+  if (!response.ok) {
+    throw new Error(`API error: ${response.statusText}`);
+  }
+
+  return ((await response.json()) as { name: string }).name;
 }

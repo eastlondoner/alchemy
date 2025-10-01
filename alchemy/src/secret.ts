@@ -1,4 +1,21 @@
-import { alchemy } from "./alchemy.js";
+import { inspect } from "node:util";
+import { alchemy } from "./alchemy.ts";
+
+declare global {
+  var __ALCHEMY_SECRETS__: {
+    [name: string]: Secret;
+  };
+}
+
+// a global registry of all secrets that we will use when serializing an application
+const globalSecrets: {
+  [name: string]: Secret<any>;
+} = (globalThis.__ALCHEMY_SECRETS__ ??= {});
+
+let i = 0;
+function nextName() {
+  return `alchemy:anonymous-secret-${i++}`;
+}
 
 /**
  * Internal wrapper for sensitive values like API keys and credentials.
@@ -35,18 +52,58 @@ import { alchemy } from "./alchemy.js";
  *   }
  * }
  */
-export class Secret {
+export class Secret<T = string> {
+  /**
+   * @internal
+   */
+  public static all(): Secret<any>[] {
+    return Object.values(globalSecrets);
+  }
+
   public readonly type = "secret";
-  constructor(readonly unencrypted: string) {}
+  constructor(
+    readonly unencrypted: T,
+    readonly name: string = nextName(),
+  ) {
+    globalSecrets[name] = this;
+  }
+
+  /**
+   * Ensures that a value is wrapped in a Secret.
+   */
+  static wrap<T>(value: T | Secret<T>): Secret<T> {
+    return isSecret<T>(value) ? value : new Secret(value);
+  }
+
+  /**
+   * Unwraps a Secret if it is wrapped, otherwise returns the value.
+   */
+  static unwrap<T, U = T>(value: T | Secret<U>): T | U {
+    return isSecret<U>(value) ? value.unencrypted : value;
+  }
+
+  /**
+   * Override toString to prevent accidental exposure of secret values
+   */
+  toString(): string {
+    return `Secret(${this.name ?? ""})`;
+  }
+
+  /**
+   * Custom inspect implementation for console.log to prevent exposing secrets
+   */
+  [inspect.custom](): string {
+    return this.toString();
+  }
 }
 
 /**
  * Type guard to check if a value is a Secret wrapper
  */
-export function isSecret(binding: any): binding is Secret {
+export function isSecret<T = string>(binding: any): binding is Secret<T> {
   return (
     binding instanceof Secret ||
-    (typeof binding === "object" && binding.type === "secret_text")
+    (typeof binding === "object" && binding?.type === "secret")
   );
 }
 
@@ -79,17 +136,20 @@ export function isSecret(binding: any): binding is Secret {
  * @throws {Error} If the value is undefined
  * @throws {Error} If no password is set in the alchemy application options or current scope
  */
-export function secret<S extends string | undefined>(unencrypted: S): Secret {
+export function secret<S = string>(
+  unencrypted: S | undefined,
+  name?: string,
+): Secret<S> {
   if (unencrypted === undefined) {
     throw new Error("Secret cannot be undefined");
   }
-  return new Secret(unencrypted);
+  return new Secret(unencrypted, name);
 }
 
 export namespace secret {
   export interface Env {
-    [key: string]: Promise<Secret>;
-    (name: string, value?: string, error?: string): Promise<Secret>;
+    [key: string]: Secret;
+    (name: string, value?: string, error?: string): Secret;
   }
 
   export const env = new Proxy(_env, {
@@ -97,14 +157,10 @@ export namespace secret {
     apply: (_, __, args: [string, any?, string?]) => _env(...args),
   }) as Env;
 
-  async function _env(
-    name: string,
-    value?: string,
-    error?: string,
-  ): Promise<Secret> {
-    const result = await alchemy.env(name, value, error);
+  function _env(name: string, value?: string, error?: string): Secret {
+    const result = alchemy.env(name, value, error);
     if (typeof result === "string") {
-      return secret(result);
+      return secret(result, name);
     }
     throw new Error(`Secret environment variable ${name} is not a string`);
   }

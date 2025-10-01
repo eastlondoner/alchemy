@@ -1,0 +1,88 @@
+name: Publish Preview Website
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+# Ensure only one workflow runs at a time per PR
+concurrency:
+  group: "pr-preview-${{ github.event.pull_request.number }}"
+  cancel-in-progress: false
+
+jobs:
+  deploy-preview:
+    if: ${{ github.event.action != 'closed' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Alchemy Environment
+        uses: ./.github/actions/setup-alchemy
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Cache Astro cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            alchemy-web/node_modules/.astro
+            alchemy-web/.astro
+          key: astro-pr-cache-${{ github.event.pull_request.number }}
+
+      - name: Deploy Website Preview
+        id: deploy
+        run: |
+          bun run build
+          bun install # to install the built `alchemy` CLI
+          bun deploy:website
+        env:
+          ALCHEMY_PASSWORD: ${{ env.ALCHEMY_PASSWORD }}
+          ALCHEMY_STATE_STORE: cloudflare
+          ALCHEMY_STATE_TOKEN: ${{ env.ALCHEMY_STATE_TOKEN }}
+          AWS_REGION: us-west-2
+          BRANCH_PREFIX: pr-${{ github.event.pull_request.number }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ env.CLOUDFLARE_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ env.CLOUDFLARE_EMAIL }}
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+
+  cleanup-preview:
+    if: ${{ github.event.action == 'closed' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Alchemy Environment
+        uses: ./.github/actions/setup-alchemy
+        with:
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Cleanup Website Preview
+        run: |
+          bun run build
+          bun install # to install the built `alchemy` CLI
+          bun destroy:website
+        env:
+          ALCHEMY_PASSWORD: ${{ env.ALCHEMY_PASSWORD }}
+          ALCHEMY_STATE_STORE: cloudflare
+          ALCHEMY_STATE_TOKEN: ${{ env.ALCHEMY_STATE_TOKEN }}
+          AWS_REGION: us-west-2
+          BRANCH_PREFIX: pr-${{ github.event.pull_request.number }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ env.CLOUDFLARE_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ env.CLOUDFLARE_EMAIL }}
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}

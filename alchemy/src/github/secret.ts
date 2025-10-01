@@ -1,8 +1,9 @@
 import sodium from "libsodium-wrappers";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { createGitHubClient, verifyGitHubAuth } from "./client.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { createGitHubClient, verifyGitHubAuth } from "./client.ts";
 /**
  * Properties for creating or updating a GitHub Secret
  */
@@ -45,9 +46,7 @@ export interface GitHubSecretProps {
 /**
  * Output returned after Secret creation/update
  */
-export interface GitHubSecretOutput
-  extends Resource<"github::Secret">,
-    Omit<GitHubSecretProps, "value"> {
+export interface GitHubSecretOutput extends Omit<GitHubSecretProps, "value"> {
   /**
    * The ID of the resource
    */
@@ -134,7 +133,7 @@ export const GitHubSecret = Resource(
   "github::Secret",
   async function (
     this: Context<GitHubSecretOutput>,
-    id: string,
+    _id: string,
     props: GitHubSecretProps,
   ): Promise<GitHubSecretOutput> {
     // Create authenticated Octokit client - will automatically handle token resolution
@@ -172,7 +171,7 @@ export const GitHubSecret = Resource(
         } catch (error: any) {
           // Ignore 404 errors (secret already deleted)
           if (error.status === 404) {
-            console.log("Secret doesn't exist, ignoring");
+            logger.log("Secret doesn't exist, ignoring");
           } else {
             throw error;
           }
@@ -190,7 +189,7 @@ export const GitHubSecret = Resource(
 
         // If secret type changed, we need to delete the old one first
         if (secretTypeChanged) {
-          console.log(
+          logger.log(
             `Secret type changed from ${wasEnvironmentSecret ? "environment" : "repository"} to ${isEnvironmentSecret ? "environment" : "repository"} secret. Deleting the old secret first.`,
           );
 
@@ -214,7 +213,7 @@ export const GitHubSecret = Resource(
           } catch (error: any) {
             // Log but don't fail if the old secret doesn't exist or can't be deleted
             if (error.status === 404) {
-              console.log(
+              logger.log(
                 "Old secret not found, continuing with creation of new secret",
               );
             } else {
@@ -223,6 +222,8 @@ export const GitHubSecret = Resource(
           }
         }
       }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       let publicKey;
 
@@ -277,7 +278,7 @@ export const GitHubSecret = Resource(
       }
       idParts.push(props.name);
 
-      return this({
+      return {
         id: idParts.join("/"),
         owner: props.owner,
         repository: props.repository,
@@ -285,20 +286,20 @@ export const GitHubSecret = Resource(
         environment: props.environment,
         token: props.token,
         updatedAt: new Date().toISOString(),
-      });
+      };
     } catch (error: any) {
       if (
         error.status === 403 &&
         error.message?.includes("Must have admin rights")
       ) {
-        console.error(
+        logger.error(
           "\n⚠️ Error creating/updating GitHub secret: You must have admin rights to the repository.",
         );
-        console.error(
+        logger.error(
           "Make sure your GitHub token has the required permissions (repo scope for private repos).\n",
         );
       } else {
-        console.error("Error creating/updating GitHub secret:", error.message);
+        logger.error("Error creating/updating GitHub secret:", error.message);
       }
       throw error;
     }

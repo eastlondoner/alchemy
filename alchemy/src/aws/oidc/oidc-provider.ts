@@ -7,9 +7,10 @@ import {
   type Tag,
   UpdateAssumeRolePolicyCommand,
 } from "@aws-sdk/client-iam";
-import type { Context } from "../../context.js";
-import { Resource } from "../../resource.js";
-import { AccountId } from "../account-id.js";
+import type { Context } from "../../context.ts";
+import { Resource } from "../../resource.ts";
+import { logger } from "../../util/logger.ts";
+import { AccountId } from "../account-id.ts";
 
 /**
  * Properties for configuring an AWS OIDC provider for GitHub Actions
@@ -70,9 +71,7 @@ export interface OIDCProviderProps {
 /**
  * Output returned after OIDC provider configuration
  */
-export interface OIDCProvider
-  extends Resource<"aws::OIDCProvider">,
-    OIDCProviderProps {
+export interface OIDCProvider extends OIDCProviderProps {
   /**
    * The ARN of the OIDC provider
    * Format: arn:aws:iam::account-id:oidc-provider/token.actions.githubusercontent.com
@@ -120,7 +119,7 @@ export const OIDCProvider = Resource(
   "aws::OIDCProvider",
   async function (
     this: Context<OIDCProvider>,
-    id: string,
+    _id: string,
     props: OIDCProviderProps,
   ) {
     // Initialize AWS SDK client
@@ -173,7 +172,7 @@ export const OIDCProvider = Resource(
           }
         } catch (error) {
           // Log but don't throw on cleanup errors
-          console.error("Error during cleanup:", error);
+          logger.error("Error during cleanup:", error);
         }
       }
       return this.destroy();
@@ -279,13 +278,13 @@ export const OIDCProvider = Resource(
         }),
       );
 
-      return this({
+      return {
         ...props,
         providerArn,
         createdAt: Date.now(),
-      });
+      };
     } catch (error) {
-      console.error("Error configuring OIDC provider:", error);
+      logger.error("Error configuring OIDC provider:", error);
       throw error;
     }
   },

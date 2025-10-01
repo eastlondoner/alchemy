@@ -1,6 +1,7 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { createGitHubClient, verifyGitHubAuth } from "./client.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { createGitHubClient, verifyGitHubAuth } from "./client.ts";
 
 /**
  * Properties for creating or updating a GitHub Repository Environment
@@ -18,8 +19,10 @@ export interface RepositoryEnvironmentProps {
 
   /**
    * Environment name
+   *
+   * @default ${app}-${stage}-${id}
    */
-  name: string;
+  name?: string;
 
   /**
    * Wait timer before allowing deployments to proceed (in minutes)
@@ -95,13 +98,16 @@ export interface RepositoryEnvironmentProps {
 /**
  * Output returned after Repository Environment creation/update
  */
-export interface RepositoryEnvironment
-  extends Resource<"github::RepositoryEnvironment">,
-    RepositoryEnvironmentProps {
+export interface RepositoryEnvironment extends RepositoryEnvironmentProps {
   /**
    * The ID of the resource
    */
   id: string;
+
+  /**
+   * Environment name
+   */
+  name: string;
 
   /**
    * The numeric ID of the environment in GitHub
@@ -186,6 +192,13 @@ export const RepositoryEnvironment = Resource(
       await verifyGitHubAuth(octokit, props.owner, props.repository);
     }
 
+    const environmentName =
+      props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output.name !== environmentName) {
+      this.replace();
+    }
+
     if (this.phase === "delete") {
       if (this.output?.id) {
         try {
@@ -193,12 +206,12 @@ export const RepositoryEnvironment = Resource(
           await octokit.rest.repos.deleteAnEnvironment({
             owner: props.owner,
             repo: props.repository,
-            environment_name: props.name,
+            environment_name: environmentName,
           });
         } catch (error: any) {
           // Ignore 404 errors (environment already deleted)
           if (error.status === 404) {
-            console.log("Environment doesn't exist, ignoring");
+            logger.log("Environment doesn't exist, ignoring");
           } else {
             throw error;
           }
@@ -210,7 +223,7 @@ export const RepositoryEnvironment = Resource(
     }
     try {
       // Check if the environment already exists
-      let environmentId: number | undefined = undefined; // Use undefined instead of 0
+      let environmentId: number | undefined; // Use undefined instead of 0
       try {
         const { data: environments } =
           await octokit.rest.repos.getAllEnvironments({
@@ -219,7 +232,7 @@ export const RepositoryEnvironment = Resource(
           });
 
         const existingEnv = environments.environments?.find(
-          (env) => env.name.toLowerCase() === props.name.toLowerCase(),
+          (env) => env.name.toLowerCase() === environmentName.toLowerCase(),
         );
 
         if (existingEnv?.id) {
@@ -302,7 +315,7 @@ export const RepositoryEnvironment = Resource(
           await octokit.rest.repos.createOrUpdateEnvironment({
             owner: props.owner,
             repo: props.repository,
-            environment_name: props.name,
+            environment_name: environmentName,
             wait_timer: props.waitTimer,
             prevent_self_review: props.preventSelfReview,
             reviewers: reviewers.length > 0 ? reviewers : undefined,
@@ -329,7 +342,7 @@ export const RepositoryEnvironment = Resource(
             await octokit.rest.repos.createDeploymentBranchPolicy({
               owner: props.owner,
               repo: props.repository,
-              environment_name: props.name,
+              environment_name: environmentName,
               name: pattern,
             });
           }
@@ -339,7 +352,7 @@ export const RepositoryEnvironment = Resource(
         await octokit.rest.repos.createOrUpdateEnvironment({
           owner: props.owner,
           repo: props.repository,
-          environment_name: props.name,
+          environment_name: environmentName,
           wait_timer: props.waitTimer,
           prevent_self_review: props.preventSelfReview,
           reviewers: reviewers.length > 0 ? reviewers : undefined,
@@ -360,7 +373,7 @@ export const RepositoryEnvironment = Resource(
             await octokit.rest.repos.listDeploymentBranchPolicies({
               owner: props.owner,
               repo: props.repository,
-              environment_name: props.name,
+              environment_name: environmentName,
             });
 
           const existingPatterns = existingPolicies.branch_policies.map(
@@ -401,7 +414,7 @@ export const RepositoryEnvironment = Resource(
               await octokit.rest.repos.deleteDeploymentBranchPolicy({
                 owner: props.owner,
                 repo: props.repository,
-                environment_name: props.name,
+                environment_name: environmentName,
                 branch_policy_id: policy.id,
               });
             }
@@ -412,7 +425,7 @@ export const RepositoryEnvironment = Resource(
             await octokit.rest.repos.createDeploymentBranchPolicy({
               owner: props.owner,
               repo: props.repository,
-              environment_name: props.name,
+              environment_name: environmentName,
               name: pattern,
             });
           }
@@ -423,16 +436,16 @@ export const RepositoryEnvironment = Resource(
       const { data: env } = await octokit.rest.repos.getEnvironment({
         owner: props.owner,
         repo: props.repository,
-        environment_name: props.name,
+        environment_name: environmentName,
       });
 
       // Return environment details
-      return this({
-        id: `${props.owner}/${props.repository}/${props.name}`,
+      return {
+        id: `${props.owner}/${props.repository}/${environmentName}`,
         environmentId: environmentId || env.id,
         owner: props.owner,
         repository: props.repository,
-        name: props.name,
+        name: environmentName,
         waitTimer: props.waitTimer,
         preventSelfReview: props.preventSelfReview,
         adminBypass: props.adminBypass,
@@ -441,20 +454,20 @@ export const RepositoryEnvironment = Resource(
         branchPatterns: props.branchPatterns,
         token: props.token,
         updatedAt: new Date().toISOString(),
-      });
+      };
     } catch (error: any) {
       if (
         error.status === 403 &&
         error.message?.includes("Must have admin rights")
       ) {
-        console.error(
+        logger.error(
           "\n⚠️ Error creating/updating GitHub environment: You must have admin rights to the repository.",
         );
-        console.error(
+        logger.error(
           "Make sure your GitHub token has the required permissions (repo scope for private repos).\n",
         );
       } else {
-        console.error(
+        logger.error(
           "Error creating/updating GitHub environment:",
           error.message,
         );

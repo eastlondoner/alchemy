@@ -2,32 +2,35 @@ import path from "node:path";
 
 // Common MIME types
 const mimeTypes: Record<string, string> = {
-  ".html": "text/html",
-  ".htm": "text/html",
   ".css": "text/css",
-  ".js": "application/javascript",
-  ".json": "application/json",
-  ".xml": "application/xml",
-  ".txt": "text/plain",
-  ".md": "text/markdown",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
+  ".eot": "application/vnd.ms-fontobject",
   ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
+  ".htm": "text/html",
+  ".html": "text/html",
   ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js.map": "application/source-map",
+  ".js": "text/javascript",
+  ".json": "application/json",
+  ".md": "text/markdown",
+  ".mjs": "text/javascript",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".otf": "font/otf",
   ".pdf": "application/pdf",
-  ".zip": "application/zip",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain",
+  ".wasm": "application/wasm",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".otf": "font/otf",
-  ".eot": "application/vnd.ms-fontobject",
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-  ".mp3": "audio/mpeg",
-  ".wav": "audio/wav",
+  ".xml": "application/xml",
+  ".zip": "application/zip",
 };
 
 /**
@@ -36,7 +39,9 @@ const mimeTypes: Record<string, string> = {
  * @param filePath Path to the file
  * @returns The content type for the file
  */
-export function getContentType(filePath: string): string {
-  const extension = path.extname(filePath).toLowerCase();
-  return mimeTypes[extension] || "application/octet-stream";
+export function getContentType(filePath: string): string | undefined {
+  if (filePath.endsWith(".js.map")) {
+    return mimeTypes[".js.map"];
+  }
+  return mimeTypes[path.extname(filePath).toLowerCase()];
 }

@@ -1,12 +1,8 @@
-import {
-  AttachRolePolicyCommand,
-  DetachRolePolicyCommand,
-  IAMClient,
-  NoSuchEntityException,
-} from "@aws-sdk/client-iam";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { ignore } from "../util/ignore.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { ignore } from "../util/ignore.ts";
+import { importPeer } from "../util/peer.ts";
+import { retry } from "./retry.ts";
 
 /**
  * Properties for creating or updating a policy attachment
@@ -26,9 +22,7 @@ export interface PolicyAttachmentProps {
 /**
  * Output returned after policy attachment creation/update
  */
-export interface PolicyAttachment
-  extends Resource<"iam::PolicyAttachment">,
-    PolicyAttachmentProps {}
+export interface PolicyAttachment extends PolicyAttachmentProps {}
 
 /**
  * AWS IAM Policy Attachment Resource
@@ -65,29 +59,42 @@ export const PolicyAttachment = Resource(
   "iam::PolicyAttachment",
   async function (
     this: Context<PolicyAttachment>,
-    id: string,
+    _id: string,
     props: PolicyAttachmentProps,
   ) {
+    const {
+      AttachRolePolicyCommand,
+      DetachRolePolicyCommand,
+      IAMClient,
+      NoSuchEntityException,
+    } = await importPeer(
+      import("@aws-sdk/client-iam"),
+      "iam::PolicyAttachment",
+    );
     const client = new IAMClient({});
 
     if (this.phase === "delete") {
       await ignore(NoSuchEntityException.name, () =>
-        client.send(
-          new DetachRolePolicyCommand({
-            PolicyArn: props.policyArn,
-            RoleName: props.roleName,
-          }),
+        retry(() =>
+          client.send(
+            new DetachRolePolicyCommand({
+              PolicyArn: props.policyArn,
+              RoleName: props.roleName,
+            }),
+          ),
         ),
       );
       return this.destroy();
     }
-    await client.send(
-      new AttachRolePolicyCommand({
-        PolicyArn: props.policyArn,
-        RoleName: props.roleName,
-      }),
+    await retry(() =>
+      client.send(
+        new AttachRolePolicyCommand({
+          PolicyArn: props.policyArn,
+          RoleName: props.roleName,
+        }),
+      ),
     );
 
-    return this(props);
+    return props;
   },
 );

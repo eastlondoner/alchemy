@@ -1,6 +1,8 @@
-import { Octokit } from "@octokit/rest";
+import type { Octokit } from "@octokit/rest";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { logger } from "../util/logger.ts";
+import { importPeer } from "../util/peer.ts";
 
 // Convert exec to promise-based
 const execAsync = promisify(exec);
@@ -17,7 +19,7 @@ export async function getGitHubTokenFromCLI(): Promise<string | null> {
     // Get the auth token
     const { stdout: token } = await execAsync("gh auth token");
     return token?.trim() || null;
-  } catch (error) {
+  } catch (_error) {
     return null;
   }
 }
@@ -51,7 +53,10 @@ export async function createGitHubClient(
   options: { token?: string } = {},
 ): Promise<Octokit> {
   const token = await getGitHubToken(options.token);
-
+  const { Octokit } = await importPeer(
+    import("@octokit/rest"),
+    "GitHub resources",
+  );
   return new Octokit({
     auth: token,
   });
@@ -77,36 +82,36 @@ export async function verifyGitHubAuth(
     });
   } catch (error: any) {
     if (error.status === 401) {
-      console.error(
+      logger.error(
         "\n⚠️ GitHub authentication failed. Please try one of the following:",
       );
-      console.error(
+      logger.error(
         "1. Run 'gh auth login' to authenticate with the GitHub CLI",
       );
-      console.error(
+      logger.error(
         "2. Set the GITHUB_TOKEN environment variable with a personal access token",
       );
-      console.error("3. Pass a token directly to the constructor");
-      console.error(
+      logger.error("3. Pass a token directly to the constructor");
+      logger.error(
         "\nTo create a token, visit: https://github.com/settings/tokens",
       );
-      console.error(
+      logger.error(
         "Required scopes: 'repo' for private repos or 'public_repo' for public repos\n",
       );
       throw new Error("GitHub authentication failed");
     }
     if (error.status === 403) {
-      console.error(
+      logger.error(
         "\n⚠️ Insufficient permissions. You need admin access to the repository.",
       );
-      console.error(
+      logger.error(
         "Make sure your token has the 'repo' scope for private repos or 'public_repo' for public repos\n",
       );
       throw new Error("Insufficient GitHub permissions");
     }
     if (error.status === 404) {
-      console.error(`\n⚠️ Repository not found: ${owner}/${repo}`);
-      console.error(
+      logger.error(`\n⚠️ Repository not found: ${owner}/${repo}`);
+      logger.error(
         "Make sure the repository exists and you have access to it\n",
       );
       throw new Error("GitHub repository not found");

@@ -1,32 +1,24 @@
-import alchemy from "../../alchemy/src/";
-import {
-  D1Database,
-  R2RestStateStore,
-  Redwood,
-} from "../../alchemy/src/cloudflare";
+import alchemy from "alchemy";
+import { D1Database, Redwood } from "alchemy/cloudflare";
 
-const BRANCH_PREFIX = process.env.BRANCH_PREFIX ?? "";
+const app = await alchemy("cloudflare-redwood");
 
-const app = await alchemy("cloudflare-redwood", {
-  phase: process.argv.includes("--destroy") ? "destroy" : "up",
-  stateStore:
-    process.env.ALCHEMY_STATE_STORE === "cloudflare"
-      ? (scope) => new R2RestStateStore(scope)
-      : undefined,
-});
-
-const database = await D1Database(`cloudflare-redwood-db${BRANCH_PREFIX}`, {
+const database = await D1Database("database", {
+  name: `${app.name}-${app.stage}-db`,
   migrationsDir: "drizzle",
+  adopt: true,
 });
 
-export const website = await Redwood(
-  `cloudflare-redwood-website${BRANCH_PREFIX}`,
-  {
-    bindings: {
-      DB: database,
-    },
+export const website = await Redwood("website", {
+  name: `${app.name}-${app.stage}-website`,
+  adopt: true,
+  bindings: {
+    DB: database,
   },
-);
+  dev: {
+    command: "vite dev --port 5004",
+  },
+});
 
 console.log({
   url: website.url,

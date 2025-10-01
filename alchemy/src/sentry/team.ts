@@ -1,7 +1,8 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { SentryApi } from "./api.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { SentryApi } from "./api.ts";
 
 /**
  * Properties for creating or updating a Team
@@ -9,8 +10,10 @@ import { SentryApi } from "./api.js";
 export interface TeamProps {
   /**
    * The name for the team
+   *
+   * @default ${app}-${stage}-${id}
    */
-  name: string;
+  name?: string;
 
   /**
    * Uniquely identifies a team and is used for the interface
@@ -39,11 +42,16 @@ export interface TeamProps {
 /**
  * Output returned after Team creation/update
  */
-export interface Team extends Resource<"sentry::Team">, TeamProps {
+export interface Team extends TeamProps {
   /**
    * The ID of the team
    */
   id: string;
+
+  /**
+   * Name of the Team.
+   */
+  name: string;
 
   /**
    * Time at which the team was created
@@ -131,6 +139,31 @@ export const Team = Resource(
   ): Promise<Team> {
     const api = new SentryApi({ authToken: props.authToken });
 
+    // it's possible that `this.output.name` is undefined because a previous version
+    // of alchemy had a bug where it didn't set the name on the output
+    // so, we try to find the key by ID and use the name from the API response
+    const lookupName = async () => {
+      if (!this.output) {
+        return undefined;
+      } else if (this.output?.name) {
+        return this.output.name;
+      }
+      const name = await getTeamName(api, props.organization, this.output.id);
+      if (name) {
+        this.output.name = name;
+      }
+      return name;
+    };
+
+    const teamName =
+      props.name ?? (await lookupName()) ?? this.scope.createPhysicalName(id);
+
+    if (this.phase === "update" && this.output.name !== teamName) {
+      // TODO(sam): can we rename without destroying?
+      // -> no: https://docs.sentry.io/api/teams/update-a-team/
+      this.replace();
+    }
+
     if (this.phase === "delete") {
       try {
         if (this.output?.id) {
@@ -138,11 +171,11 @@ export const Team = Resource(
             `/teams/${props.organization}/${this.output.slug || this.output.id}/`,
           );
           if (!response.ok && response.status !== 404) {
-            console.error("Error deleting team:", response.statusText);
+            logger.error("Error deleting team:", response.statusText);
           }
         }
       } catch (error) {
-        console.error("Error deleting team:", error);
+        logger.error("Error deleting team:", error);
       }
       return this.destroy();
     } else {
@@ -163,22 +196,22 @@ export const Team = Resource(
           } catch (error) {
             // Check if this is a "team already exists" error and adopt is enabled
             if (
-              props.adopt &&
+              (props.adopt ?? this.scope.adopt) &&
               error instanceof Error &&
               error.message.includes("already exists")
             ) {
-              console.log(
-                `Team '${props.slug || props.name}' already exists, adopting it`,
+              logger.log(
+                `Team '${props.slug || teamName}' already exists, adopting it`,
               );
               // Find the existing team by slug
               const existingTeam = await findTeamBySlug(
                 api,
                 props.organization,
-                props.slug || props.name,
+                props.slug || teamName,
               );
               if (!existingTeam) {
                 throw new Error(
-                  `Failed to find existing team '${props.slug || props.name}' for adoption`,
+                  `Failed to find existing team '${props.slug || teamName}' for adoption`,
                 );
               }
               response = await api.get(
@@ -191,13 +224,16 @@ export const Team = Resource(
         }
 
         if (!response.ok) {
-          throw new Error(`API error: ${response.statusText}`);
+          throw new Error(
+            `API error: ${response.statusText} ${await response.text()}`,
+          );
         }
 
         const data = (await response.json()) as Omit<Team, keyof TeamProps>;
-        return this({
+        return {
           ...props,
           id: data.id,
+          name: teamName,
           dateCreated: data.dateCreated,
           isMember: data.isMember,
           teamRole: data.teamRole,
@@ -207,9 +243,9 @@ export const Team = Resource(
           isPending: data.isPending,
           memberCount: data.memberCount,
           avatar: data.avatar,
-        });
+        };
       } catch (error) {
-        console.error("Error creating/updating team:", error);
+        logger.error("Error creating/updating team:", error);
         throw error;
       }
     }
@@ -232,4 +268,17 @@ async function findTeamBySlug(
   const teams = (await response.json()) as Array<{ id: string; slug: string }>;
   const team = teams.find((t) => t.slug === slug);
   return team ? { id: team.id, slug: team.slug } : null;
+}
+
+async function getTeamName(
+  api: SentryApi,
+  organization: string,
+  slug: string,
+): Promise<string | undefined> {
+  const response = await api.get(`/teams/${organization}/${slug}/`);
+  if (!response.ok) {
+    throw new Error(`API error: ${response.statusText}`);
+  }
+
+  return ((await response.json()) as { name: string }).name;
 }

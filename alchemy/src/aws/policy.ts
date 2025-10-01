@@ -1,16 +1,7 @@
-import {
-  CreatePolicyCommand,
-  CreatePolicyVersionCommand,
-  DeletePolicyCommand,
-  DeletePolicyVersionCommand,
-  GetPolicyCommand,
-  GetPolicyVersionCommand,
-  IAMClient,
-  ListPolicyVersionsCommand,
-  NoSuchEntityException,
-} from "@aws-sdk/client-iam";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { importPeer } from "../util/peer.ts";
+import { retry } from "./retry.ts";
 
 /**
  * Type of effect for a policy statement
@@ -88,8 +79,10 @@ export interface PolicyDocument {
 export interface PolicyProps {
   /**
    * Name of the policy
+   *
+   * @default ${app}-${stage}-${id}
    */
-  policyName: string;
+  policyName?: string;
 
   /**
    * Policy document defining the permissions
@@ -115,11 +108,16 @@ export interface PolicyProps {
 /**
  * Output returned after IAM policy creation/update
  */
-export interface Policy extends Resource<"iam::Policy">, PolicyProps {
+export interface Policy extends PolicyProps {
   /**
    * ARN of the policy
    */
   arn: string;
+
+  /**
+   * Name of the Policy.
+   */
+  policyName: string;
 
   /**
    * ID of the default policy version
@@ -232,34 +230,59 @@ export const Policy = Resource(
     id: string,
     props: PolicyProps,
   ): Promise<Policy> {
+    const {
+      CreatePolicyCommand,
+      CreatePolicyVersionCommand,
+      DeletePolicyCommand,
+      DeletePolicyVersionCommand,
+      GetPolicyCommand,
+      GetPolicyVersionCommand,
+      IAMClient,
+      ListPolicyVersionsCommand,
+      NoSuchEntityException,
+    } = await importPeer(import("@aws-sdk/client-iam"), "iam::Policy");
     const client = new IAMClient({});
-    const policyArn = `arn:aws:iam::${process.env.AWS_ACCOUNT_ID}:policy${props.path || "/"}${props.policyName}`;
+    const policyName =
+      props.policyName ??
+      this.output?.policyName ??
+      this.scope.createPhysicalName(id);
+    const policyArn = `arn:aws:iam::${process.env.AWS_ACCOUNT_ID}:policy${props.path || "/"}${policyName}`;
+
+    if (this.phase === "update" && this.output.policyName !== policyName) {
+      this.replace();
+    }
 
     if (this.phase === "delete") {
       try {
         // List and delete all non-default versions first
-        const versions = await client.send(
-          new ListPolicyVersionsCommand({
-            PolicyArn: policyArn,
-          }),
+        const versions = await retry(() =>
+          client.send(
+            new ListPolicyVersionsCommand({
+              PolicyArn: policyArn,
+            }),
+          ),
         );
 
         for (const version of versions.Versions || []) {
           if (!version.IsDefaultVersion) {
-            await client.send(
-              new DeletePolicyVersionCommand({
-                PolicyArn: policyArn,
-                VersionId: version.VersionId,
-              }),
+            await retry(() =>
+              client.send(
+                new DeletePolicyVersionCommand({
+                  PolicyArn: policyArn,
+                  VersionId: version.VersionId,
+                }),
+              ),
             );
           }
         }
 
         // Delete the policy
-        await client.send(
-          new DeletePolicyCommand({
-            PolicyArn: policyArn,
-          }),
+        await retry(() =>
+          client.send(
+            new DeletePolicyCommand({
+              PolicyArn: policyArn,
+            }),
+          ),
         );
       } catch (error: any) {
         if (error.name !== NoSuchEntityException.name) {
@@ -270,18 +293,22 @@ export const Policy = Resource(
     }
     try {
       // Check if policy exists
-      const existingPolicy = await client.send(
-        new GetPolicyCommand({
-          PolicyArn: policyArn,
-        }),
+      const existingPolicy = await retry(() =>
+        client.send(
+          new GetPolicyCommand({
+            PolicyArn: policyArn,
+          }),
+        ),
       );
 
       // Get current policy version
-      const currentVersion = await client.send(
-        new GetPolicyVersionCommand({
-          PolicyArn: policyArn,
-          VersionId: existingPolicy.Policy!.DefaultVersionId!,
-        }),
+      const currentVersion = await retry(() =>
+        client.send(
+          new GetPolicyVersionCommand({
+            PolicyArn: policyArn,
+            VersionId: existingPolicy.Policy!.DefaultVersionId!,
+          }),
+        ),
       );
 
       const currentDocument = JSON.parse(
@@ -291,10 +318,12 @@ export const Policy = Resource(
       // If policy document changed, create new version
       if (JSON.stringify(currentDocument) !== JSON.stringify(props.document)) {
         // List versions to check if we need to delete old ones
-        const versions = await client.send(
-          new ListPolicyVersionsCommand({
-            PolicyArn: policyArn,
-          }),
+        const versions = await retry(() =>
+          client.send(
+            new ListPolicyVersionsCommand({
+              PolicyArn: policyArn,
+            }),
+          ),
         );
 
         // Delete oldest version if we have 5 versions (maximum allowed)
@@ -304,67 +333,77 @@ export const Policy = Resource(
           )[0];
 
           if (!oldestVersion.IsDefaultVersion) {
-            await client.send(
-              new DeletePolicyVersionCommand({
-                PolicyArn: policyArn,
-                VersionId: oldestVersion.VersionId!,
-              }),
+            await retry(() =>
+              client.send(
+                new DeletePolicyVersionCommand({
+                  PolicyArn: policyArn,
+                  VersionId: oldestVersion.VersionId!,
+                }),
+              ),
             );
           }
         }
 
         // Create new version
-        await client.send(
-          new CreatePolicyVersionCommand({
-            PolicyArn: policyArn,
-            PolicyDocument: JSON.stringify(props.document),
-            SetAsDefault: true,
-          }),
+        await retry(() =>
+          client.send(
+            new CreatePolicyVersionCommand({
+              PolicyArn: policyArn,
+              PolicyDocument: JSON.stringify(props.document),
+              SetAsDefault: true,
+            }),
+          ),
         );
       }
 
-      const policy = await client.send(
-        new GetPolicyCommand({
-          PolicyArn: policyArn,
-        }),
+      const policy = await retry(() =>
+        client.send(
+          new GetPolicyCommand({
+            PolicyArn: policyArn,
+          }),
+        ),
       );
 
-      return this({
+      return {
         ...props,
         arn: policy.Policy!.Arn!,
+        policyName,
         defaultVersionId: policy.Policy!.DefaultVersionId!,
         attachmentCount: policy.Policy!.AttachmentCount!,
         createDate: policy.Policy!.CreateDate!,
         updateDate: policy.Policy!.UpdateDate!,
         isAttachable: policy.Policy!.IsAttachable!,
-      });
+      };
     } catch (error: any) {
       if (error.name === "NoSuchEntity") {
         // Create new policy
-        const newPolicy = await client.send(
-          new CreatePolicyCommand({
-            PolicyName: props.policyName,
-            PolicyDocument: JSON.stringify(props.document),
-            Description: props.description,
-            Path: props.path,
-            Tags: props.tags
-              ? Object.entries(props.tags).map(([Key, Value]) => ({
-                  Key,
-                  Value,
-                }))
-              : undefined,
-          }),
+        const newPolicy = await retry(() =>
+          client.send(
+            new CreatePolicyCommand({
+              PolicyName: policyName,
+              PolicyDocument: JSON.stringify(props.document),
+              Description: props.description,
+              Path: props.path,
+              Tags: props.tags
+                ? Object.entries(props.tags).map(([Key, Value]) => ({
+                    Key,
+                    Value,
+                  }))
+                : undefined,
+            }),
+          ),
         );
 
-        return this({
+        return {
           ...props,
           arn: newPolicy.Policy!.Arn!,
+          policyName,
           defaultVersionId: newPolicy.Policy!.DefaultVersionId!,
           attachmentCount: newPolicy.Policy!.AttachmentCount!,
           createDate: newPolicy.Policy!.CreateDate!,
           updateDate: newPolicy.Policy!.UpdateDate!,
           isAttachable: newPolicy.Policy!.IsAttachable!,
-        });
+        };
       }
       throw error;
     }

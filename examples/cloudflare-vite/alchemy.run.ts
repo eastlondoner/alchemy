@@ -1,47 +1,38 @@
 /// <reference types="node" />
 
-import alchemy from "../../alchemy/src/";
-import {
-  KVNamespace,
-  R2Bucket,
-  R2RestStateStore,
-  Vite,
-} from "../../alchemy/src/cloudflare";
+import alchemy from "alchemy";
+import { KVNamespace, Vite } from "alchemy/cloudflare";
 
-const BRANCH_PREFIX = process.env.BRANCH_PREFIX ?? "";
-const app = await alchemy("cloudflare-vite", {
-  stage: process.env.USER ?? "dev",
-  phase: process.argv.includes("--destroy") ? "destroy" : "up",
-  quiet: !process.argv.includes("--verbose"),
-  password: process.env.ALCHEMY_PASSWORD,
-  stateStore:
-    process.env.ALCHEMY_STATE_STORE === "cloudflare"
-      ? (scope) => new R2RestStateStore(scope)
-      : undefined,
+const app = await alchemy("cloudflare-vite");
+
+export const kv = await KVNamespace("kv", {
+  title: `${app.name}-${app.stage}-kv`,
+  adopt: true,
 });
 
-export const [authStore, storage] = await Promise.all([
-  KVNamespace("AUTH_STORE", {
-    title: `cloudflare-vite-auth-store${BRANCH_PREFIX}`,
-  }),
-  R2Bucket(`cloudflare-vite-storage${BRANCH_PREFIX}`, {
-    allowPublicAccess: false,
-    // so that CI is idempotent
-    adopt: true,
-  }),
-]);
-
-export const website = await Vite(`cloudflare-vite-website${BRANCH_PREFIX}`, {
-  main: "./src/index.ts",
-  command: "bun run build",
+export const website = await Vite("website", {
+  entrypoint: "src/index.ts",
+  noBundle: false,
+  adopt: true,
   bindings: {
-    STORAGE: storage,
-    AUTH_STORE: authStore,
+    KV: kv,
+    ALCHEMY_TEST_VALUE: alchemy.secret("Hello from Alchemy!"),
+  },
+  dev: {
+    command: "vite dev --port 5006",
   },
 });
 
 console.log({
   url: website.url,
 });
+
+if (process.env.ALCHEMY_E2E) {
+  const { test } = await import("./test/e2e.js");
+  await test({
+    url: website.url,
+    env: { ALCHEMY_TEST_VALUE: "Hello from Alchemy!" },
+  });
+}
 
 await app.finalize();

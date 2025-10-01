@@ -1,24 +1,34 @@
-import "../../alchemy/src/cloudflare";
+import alchemy from "alchemy";
+import { KVNamespace, TanStackStart } from "alchemy/cloudflare";
 
-import alchemy from "../../alchemy/src";
-import { R2RestStateStore, TanStackStart } from "../../alchemy/src/cloudflare";
+const app = await alchemy("cloudflare-tanstack");
 
-const BRANCH_PREFIX = process.env.BRANCH_PREFIX ?? "";
-
-const app = await alchemy("cloudflare-tanstack", {
-  phase: process.argv.includes("--destroy") ? "destroy" : "up",
-  stateStore:
-    process.env.ALCHEMY_STATE_STORE === "cloudflare"
-      ? (scope) => new R2RestStateStore(scope)
-      : undefined,
+export const kv = await KVNamespace("kv", {
+  title: `${app.name}-${app.stage}-kv`,
 });
 
-export const website = await TanStackStart(
-  `cloudflare-tanstack-website${BRANCH_PREFIX}`,
-);
+export const website = await TanStackStart("website", {
+  name: `${app.name}-${app.stage}-website`,
+  bindings: {
+    KV: kv,
+    TEST_SECRET_VALUE: alchemy.secret("test-secret-value"),
+  },
+  adopt: true,
+  dev: {
+    command: "vite dev --port 5005",
+  },
+});
 
 console.log({
   url: website.url,
 });
+
+if (process.env.ALCHEMY_E2E) {
+  const { test } = await import("./test/e2e.js");
+  await test({
+    url: website.url,
+    env: { TEST_SECRET_VALUE: "test-secret-value" },
+  });
+}
 
 await app.finalize();

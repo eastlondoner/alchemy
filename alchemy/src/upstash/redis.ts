@@ -1,9 +1,10 @@
-import { alchemy } from "../alchemy.js";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import type { Secret } from "../secret.js";
-import { UpstashApi } from "./api.js";
-import { UpstashError } from "./error.js";
+import { alchemy } from "../alchemy.ts";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import type { Secret } from "../secret.ts";
+import { logger } from "../util/logger.ts";
+import { UpstashApi } from "./api.ts";
+import { UpstashError } from "./error.ts";
 
 /**
  * Available regions for Upstash Redis databases
@@ -25,8 +26,10 @@ export type UpstashRegion =
 export interface UpstashRedisProps {
   /**
    * Name of the database
+   *
+   * @default ${app}-${stage}-${id}
    */
-  name: string;
+  name?: string;
 
   /**
    * Primary region for the database
@@ -62,13 +65,16 @@ export interface UpstashRedisProps {
 /**
  * Output returned after UpstashRedis creation/update
  */
-export interface UpstashRedis
-  extends Resource<"upstash::Redis">,
-    UpstashRedisProps {
+export interface UpstashRedis extends UpstashRedisProps {
   /**
    * ID of the database
    */
   id: string;
+
+  /**
+   * Name of the database.
+   */
+  name: string;
 
   /**
    * Type of the database in terms of pricing model
@@ -164,6 +170,9 @@ export const UpstashRedis = Resource(
       email: props.email,
     });
 
+    const databaseName =
+      props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
     if (this.phase === "delete") {
       await deleteRedisDatabase(api, this.output.id);
       return this.destroy();
@@ -171,13 +180,13 @@ export const UpstashRedis = Resource(
 
     const eviction = props.eviction ?? false;
 
-    // @ts-ignore This is overridden during update/create
+    // @ts-expect-error This is overridden during update/create
     let database: UpstashDatabaseResponse = {};
 
     if (this.phase === "update") {
       // Update name if changed
-      if (props.name !== this.output.name) {
-        await renameRedisDatabase(api, this.output.id, props.name);
+      if (databaseName !== this.output.name) {
+        await renameRedisDatabase(api, this.output.id, databaseName);
       }
 
       // Update read regions if changed
@@ -207,7 +216,7 @@ export const UpstashRedis = Resource(
     if (this.phase === "create") {
       database = await createRedisDatabase(api, {
         budget: props.budget,
-        name: props.name,
+        name: databaseName,
         primary_region: props.primaryRegion,
         read_regions: props.readRegions,
         region: "global",
@@ -366,7 +375,7 @@ export async function setRedisEviction(
   );
 
   if (!response.ok) {
-    console.warn(
+    logger.warn(
       `API error updating eviction (status: ${response.status}): ${response.statusText}. (Eviction may already be set)`,
     );
   }

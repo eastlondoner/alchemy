@@ -1,9 +1,10 @@
-import esbuild from "esbuild";
+import type esbuild from "esbuild";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
 
 /**
  * Properties for creating or updating an esbuild bundle
@@ -67,20 +68,13 @@ export interface BundleProps extends Partial<esbuild.BuildOptions> {
    * neutral: Platform-agnostic
    */
   platform?: "browser" | "node" | "neutral";
-
-  /**
-   * Additional esbuild options
-   * Any other valid esbuild BuildOptions
-   */
-  options?: Partial<esbuild.BuildOptions>;
 }
 
 /**
  * Output returned after bundle creation/update
  */
 export interface Bundle<P extends BundleProps = BundleProps>
-  extends Resource<"esbuild::Bundle">,
-    BundleProps {
+  extends BundleProps {
   /**
    * Path to the bundled file
    * Absolute or relative path to the generated bundle
@@ -122,7 +116,7 @@ export const Bundle = Resource(
   },
   async function <Props extends BundleProps>(
     this: Context<Bundle<any>>,
-    id: string,
+    _id: string,
     props: Props,
   ): Promise<Bundle<Props>> {
     if (this.phase === "delete") {
@@ -166,34 +160,36 @@ export const Bundle = Resource(
     if (outputFile === undefined && bundlePath === undefined) {
       throw new Error("Failed to create bundle");
     }
+    type Path = Props extends { outdir: string } | { outfile: string }
+      ? string
+      : undefined;
     if (outputFile) {
-      return this({
+      return {
         ...props,
-        path: bundlePath,
+        path: bundlePath as Path,
         hash: outputFile.hash,
         content: outputFile.text,
-      });
+      };
     }
     const content = await fs.readFile(bundlePath!, "utf-8");
-    return this({
+    return {
       ...props,
-      path: bundlePath,
+      path: bundlePath as Path,
       hash: crypto.createHash("sha256").update(content).digest("hex"),
       content,
-    });
+    };
   },
 );
 
 export async function bundle(props: BundleProps) {
-  const { entryPoint, options: _, ...rest } = props;
+  const { entryPoint, ...rest } = props;
   const options = {
     ...rest,
-    ...props.options,
     write: !(props.outdir === undefined && props.outfile === undefined),
     // write:
     //   props.outdir === undefined && props.outfile === undefined ? false : true,
     // write: false,
-    entryPoints: [props.entryPoint],
+    entryPoints: [entryPoint],
     outdir: props.outdir ? props.outdir : props.outfile ? undefined : ".out",
     outfile: props.outfile,
     bundle: true,
@@ -201,12 +197,13 @@ export async function bundle(props: BundleProps) {
     target: props.target,
     minify: props.minify,
     sourcemap: props.sourcemap,
-    external: [...(props.external ?? []), ...(props.options?.external ?? [])],
+    external: props.external,
     platform: props.platform,
     metafile: true,
   };
   if (process.env.DEBUG) {
-    console.log(options);
+    logger.log(options);
   }
+  const esbuild = await import("esbuild");
   return await esbuild.build(options);
 }

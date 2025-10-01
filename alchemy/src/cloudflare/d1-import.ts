@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import type { CloudflareApi } from "./api.js";
+import { logger } from "../util/logger.ts";
+import type { CloudflareApiResponse } from "./api-response.ts";
+import type { CloudflareApi } from "./api.ts";
 
 /**
  * Options for importing SQL into a D1 database
@@ -194,20 +196,6 @@ interface ImportPollingResponse {
 }
 
 /**
- * Cloudflare API response structure
- */
-interface CloudflareApiResponse<T> {
-  result: T;
-  success: boolean;
-  errors: Array<{
-    message: string;
-  }>;
-  messages: Array<{
-    message: string;
-  }>;
-}
-
-/**
  * Calculates MD5 hash for a string
  */
 function getMd5Hash(data: string): string {
@@ -386,7 +374,7 @@ async function pollImportStatus(
   // Log messages for visibility
   if (data.messages && data.messages.length > 0) {
     for (const message of data.messages) {
-      console.log(`D1 Import: ${message}`);
+      logger.log(`D1 Import: ${message}`);
     }
   }
 

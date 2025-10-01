@@ -1,8 +1,9 @@
-import fs from "node:fs/promises";
 import path from "node:path";
-
-import { destroy, DestroyedSignal } from "./destroy.js";
-import { env } from "./env.js";
+import { execArgv } from "node:process";
+import { onExit } from "signal-exit";
+import { isReplacedSignal } from "./apply.ts";
+import { DestroyStrategy, destroy, isDestroyedSignal } from "./destroy.ts";
+import { env } from "./env.ts";
 import {
   ResourceFQN,
   ResourceID,
@@ -10,10 +11,13 @@ import {
   ResourceScope,
   ResourceSeq,
   type PendingResource,
-} from "./resource.js";
-import { Scope } from "./scope.js";
-import { secret } from "./secret.js";
-import type { StateStoreType } from "./state.js";
+} from "./resource.ts";
+import { DEFAULT_STAGE, Scope, type ProviderCredentials } from "./scope.ts";
+import { secret } from "./secret.ts";
+import type { StateStoreType } from "./state.ts";
+import type { LoggerApi } from "./util/cli.ts";
+import { ALCHEMY_ROOT } from "./util/root-dir.ts";
+import { TelemetryClient } from "./util/telemetry/client.ts";
 
 /**
  * Type alias for semantic highlighting of `alchemy` as a type keyword
@@ -25,9 +29,16 @@ export const alchemy: Alchemy = _alchemy as any;
 /**
  * The Alchemy interface provides core functionality and is augmented by providers.
  * Supports both application scoping with secrets and template string interpolation.
+ * Automatically parses CLI arguments for common options.
  *
  * @example
- * // Create an application scope with stage and secret handling
+ * // Simple usage with automatic CLI argument parsing
+ * const app = await alchemy("my-app");
+ * // Now supports: --destroy, --read, --quiet, --stage my-stage
+ * // Environment variables: PASSWORD, ALCHEMY_PASSWORD, ALCHEMY_STAGE, USER
+ *
+ * @example
+ * // Create an application scope with explicit options (overrides CLI args)
  * const app = await alchemy("github:alchemy", {
  *   stage: "prod",
  *   phase: "up",
@@ -57,11 +68,19 @@ export interface Alchemy {
    * or locally in the current scope.
    */
   secret: typeof secret;
+
   /**
    * Creates a new application scope with the given name and options.
    * Used to create and manage resources with proper secret handling.
+   * Automatically parses CLI arguments: --destroy, --read, --quiet, --stage <name>
+   * Environment variables: PASSWORD, ALCHEMY_PASSWORD, ALCHEMY_STAGE, USER
    *
    * @example
+   * // Simple usage with CLI argument parsing
+   * const app = await alchemy("my-app");
+   *
+   * @example
+   * // With explicit options (overrides CLI args)
    * const app = await alchemy("my-app", {
    *   stage: "prod",
    *   // Required for encrypting/decrypting secrets
@@ -69,24 +88,6 @@ export interface Alchemy {
    * });
    */
   (appName: string, options?: Omit<AlchemyOptions, "appName">): Promise<Scope>;
-  /**
-   * Template literal tag that supports file interpolation for documentation.
-   * Automatically formats the content and appends file contents as code blocks.
-   *
-   * @example
-   * // Generate documentation using file contents
-   * await Document("api-docs", {
-   *   prompt: await alchemy`
-   *     Generate docs using the contents of:
-   *     ${alchemy.file("README.md")}
-   *     ${alchemy.file("./.cursorrules")}
-   *
-   *     And here are the source files:
-   *     ${alchemy.files(files)}
-   *   `
-   * });
-   */
-  (template: TemplateStringsArray, ...values: any[]): Promise<string>;
 }
 
 _alchemy.destroy = destroy;
@@ -95,142 +96,109 @@ _alchemy.secret = secret;
 _alchemy.env = env;
 
 /**
- * Implementation of the alchemy function that handles both application scoping
- * and template string interpolation.
+ * Implementation of the alchemy function.
  */
 async function _alchemy(
-  ...args:
-    | [template: TemplateStringsArray, ...values: any[]]
-    | [appName: string, options?: Omit<AlchemyOptions, "appName">]
-): Promise<Scope | string | never> {
-  if (typeof args[0] === "string") {
-    const [appName, options] = args as [string, AlchemyOptions?];
-    const phase = options?.phase ?? "up";
-    const root = new Scope({
-      ...options,
-      appName,
-      stage: options?.stage,
-      phase,
-    });
-    root.enter();
-    if (options?.phase === "destroy") {
-      await destroy(root);
-      return process.exit(0);
-    }
-    return root;
+  appName: string,
+  options?: Omit<AlchemyOptions, "appName">,
+): Promise<Scope> {
+  const cliArgs = process.argv.slice(2);
+  // user may select a specific app to auto-enable read mode for any other app
+  const app = parseOption("--app");
+  function parseOption<D extends string | undefined>(
+    option: string,
+    defaultValue?: D,
+  ): D {
+    const i = cliArgs.indexOf(option);
+    return (
+      i !== -1 && i + 1 < cliArgs.length ? cliArgs[i + 1] : defaultValue
+    ) as D;
   }
-  const [template, ...values] = args;
-  const [, secondLine] = template[0].split("\n");
-  const leadingSpaces = secondLine
-    ? secondLine.match(/^(\s*)/)?.[1]?.length || 0
-    : 0;
-  const indent = " ".repeat(leadingSpaces);
+  const cliOptions = {
+    phase:
+      app && app !== appName
+        ? "read"
+        : cliArgs.includes("--destroy")
+          ? "destroy"
+          : cliArgs.includes("--read")
+            ? "read"
+            : "up",
+    local: cliArgs.includes("--local") || cliArgs.includes("--dev"),
+    watch: cliArgs.includes("--watch") || execArgv.includes("--watch"),
+    quiet: cliArgs.includes("--quiet"),
+    force: cliArgs.includes("--force"),
+    tunnel: cliArgs.includes("--tunnel"),
+    // Parse stage argument (--stage my-stage) functionally and inline as a property declaration
+    stage: (function parseStage() {
+      const i = cliArgs.indexOf("--stage");
+      return i !== -1 && i + 1 < cliArgs.length
+        ? cliArgs[i + 1]
+        : process.env.STAGE;
+    })(),
+    password: process.env.ALCHEMY_PASSWORD,
+    adopt: cliArgs.includes("--adopt"),
+    rootDir: path.resolve(parseOption("--root-dir", ALCHEMY_ROOT)),
+  } satisfies Partial<AlchemyOptions>;
+  const mergedOptions = {
+    ...cliOptions,
+    ...options,
+  };
+  if (
+    mergedOptions.stateStore === undefined &&
+    process.env.CI &&
+    process.env.ALCHEMY_CI_STATE_STORE_CHECK !== "false"
+  ) {
+    throw new Error(`You are running Alchemy in a CI environment with the default local state store. 
+This can lead to orphaned infrastructure and is rarely what you want to do.
 
-  const [{ isFileRef }, { isFileCollection }] = await Promise.all([
-    import("./fs/file-ref.js"),
-    import("./fs/file-collection.js"),
-  ]);
+Instead, you should choose a persistent state store:
+1. CloudflareStateStore (https://alchemy.run/concepts/state/#cloudflare-state-store)
+2. S3StateStore (https://alchemy.run/providers/aws/s3-state-store/)
 
-  const appendices: Record<string, string> = {};
+You can read more about State and State Stores here: https://alchemy.run/concepts/state/#customizing-state-storage
 
-  const stringValues = await Promise.all(
-    values.map(async function resolve(value): Promise<string> {
-      if (typeof value === "string") {
-        return indent + value;
-      }
-      if (value === null) {
-        return "null";
-      }
-      if (value === undefined) {
-        return "undefined";
-      }
-      if (
-        typeof value === "number" ||
-        typeof value === "boolean" ||
-        typeof value === "bigint"
-      ) {
-        return value.toString();
-      }
-      if (value instanceof Promise) {
-        return resolve(await value);
-      }
-      if (isFileRef(value)) {
-        if (!(value.path in appendices)) {
-          appendices[value.path] = await fs.readFile(value.path, "utf-8");
-        }
-        return `[${path.basename(value.path)}](${value.path})`;
-      }
-      if (isFileCollection(value)) {
-        return Object.entries(value.files)
-          .map(([filePath, content]) => {
-            appendices[filePath] = content;
-            return `[${path.basename(filePath)}](${filePath})`;
-          })
-          .join("\n\n");
-      }
-      if (Array.isArray(value)) {
-        return (
-          await Promise.all(
-            value.map(async (value, i) => `${i}. ${await resolve(value)}`),
-          )
-        ).join("\n");
-      }
-      if (typeof value === "object" && typeof value.path === "string") {
-        if (typeof value.content === "string") {
-          appendices[value.path] = value.content;
-          return `[${path.basename(value.path)}](${value.path})`;
-        }
-        appendices[value.path] = await fs.readFile(value.path, "utf-8");
-        return `[${path.basename(value.path)}](${value.path})`;
-      }
-      if (typeof value === "object") {
-        return (
-          await Promise.all(
-            Object.entries(value).map(async ([key, value]) => {
-              return `* ${key}: ${await resolve(value)}`;
-            }),
-          )
-        ).join("\n");
-      }
-      // TODO: support other types
-      console.log(value);
-      throw new Error(`Unsupported value type: ${value}`);
-    }),
-  );
+If this is a mistake, you can disable this check by setting the ALCHEMY_CI_STATE_STORE_CHECK=false.
+`);
+  }
 
-  // Construct the string template by joining template parts with interpolated values
-  const lines = template
-    .map((part) =>
-      part
-        .split("\n")
-        .map((line) =>
-          line.startsWith(indent) ? line.slice(indent.length) : line,
-        )
-        .join("\n"),
-    )
-    .flatMap((part, i) =>
-      i < stringValues.length ? [part, stringValues[i] ?? ""] : [part],
-    )
-    .join("")
-    .split("\n");
-
-  // Collect and sort appendices by file path
-  return [
-    // format the user prompt and trim the first line if it's empty
-    lines.length > 1 && lines[0].replaceAll(" ", "").length === 0
-      ? lines.slice(1).join("\n")
-      : lines.join("\n"),
-
-    // sort appendices by path and include at the end of the prompt
-    Object.entries(appendices)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([filePath, content]) => {
-        const extension = path.extname(filePath).slice(1);
-        const codeTag = extension ? extension : "";
-        return `// ${filePath}\n\`\`\`${codeTag}\n${content}\n\`\`\``;
-      })
-      .join("\n\n"),
-  ].join("\n");
+  const phase = mergedOptions?.phase ?? "up";
+  const telemetryClient =
+    mergedOptions?.parent?.telemetryClient ??
+    TelemetryClient.create({
+      phase,
+      enabled: mergedOptions?.telemetry ?? true,
+      quiet: mergedOptions?.quiet ?? false,
+    });
+  const root = new Scope({
+    ...mergedOptions,
+    parent: undefined,
+    scopeName: appName,
+    phase,
+    password: mergedOptions?.password ?? process.env.ALCHEMY_PASSWORD,
+    telemetryClient,
+    isSelected: app === undefined ? undefined : app === appName,
+  });
+  onExit((code) => {
+    root.cleanup().then(() => {
+      code = code === 130 ? 0 : (code ?? 0);
+      process.exit(code);
+    });
+    return true;
+  });
+  const stageName = mergedOptions?.stage ?? DEFAULT_STAGE;
+  const stage = new Scope({
+    ...mergedOptions,
+    parent: root,
+    scopeName: stageName,
+    stage: stageName,
+  });
+  Scope.storage.enterWith(root);
+  Scope.storage.enterWith(stage);
+  if (mergedOptions?.phase === "destroy") {
+    await destroy(stage);
+    return process.exit(0);
+  }
+  return root;
 }
 
 export type Phase = "up" | "destroy" | "read";
@@ -246,6 +214,30 @@ export interface AlchemyOptions {
    * @default "up"
    */
   phase?: Phase;
+  /**
+   * Determines if resources should be simulated locally (where possible)
+   *
+   * @default - `true` if ran with `alchemy dev` or `bun ./alchemy.run.ts --dev`
+   */
+  local?: boolean;
+  /**
+   * Determines if local changes to resources should be reactively pushed to the local or remote environment.
+   *
+   * @default - `true` if ran with `alchemy dev`, `alchemy watch`, `bun --watch ./alchemy.run.ts`
+   */
+  watch?: boolean;
+  /**
+   * Apply updates to resources even if there are no changes.
+   *
+   * @default false
+   */
+  force?: boolean;
+  /**
+   * Whether to create a tunnel for supported resources.
+   *
+   * @default false
+   */
+  tunnel?: boolean;
   /**
    * Name to scope the resource state under (e.g. `.alchemy/{stage}/..`).
    *
@@ -267,6 +259,16 @@ export interface AlchemyOptions {
    */
   parent?: Scope;
   /**
+   * The strategy to use when destroying resources.
+   *
+   * @default "sequential"
+   */
+  destroyStrategy?: DestroyStrategy;
+  /**
+   * If true, children of the resource will not be destroyed (but their state will be deleted).
+   */
+  noop?: boolean;
+  /**
    * If true, will not print any Create/Update/Delete messages.
    *
    * @default false
@@ -277,13 +279,41 @@ export interface AlchemyOptions {
    * Required if using alchemy.secret() in this scope.
    */
   password?: string;
+  /**
+   * Whether to send anonymous telemetry data to the Alchemy team.
+   * You can also opt out by setting the `DO_NOT_TRACK` or `ALCHEMY_TELEMETRY_DISABLED` environment variables to a truthy value.
+   *
+   * @default true
+   */
+  telemetry?: boolean;
+  /**
+   * A custom logger instance to use for this scope.
+   * If not provided, the default fallback logger will be used.
+   */
+  logger?: LoggerApi;
+  /**
+   * Whether to adopt resources if they already exist but are not yet managed by your Alchemy app.
+   *
+   * @default false
+   */
+  adopt?: boolean;
+  /**
+   * The root directory of the project.
+   *
+   * @default process.cwd()
+   */
+  rootDir?: string;
+  /**
+   * Whether this is the application that was selected with `--app`
+   *
+   * `true` if the application was selected with `--app`
+   * `false` if the application was not selected with `--app`
+   * `undefined` if the program was not run with `--app`
+   */
+  isSelected?: boolean;
 }
 
-export interface ScopeOptions extends AlchemyOptions {
-  enter: boolean;
-}
-
-export interface RunOptions extends AlchemyOptions {
+export interface RunOptions extends AlchemyOptions, ProviderCredentials {
   /**
    * @default false
    */
@@ -323,10 +353,20 @@ async function run<T>(
           RunOptions,
           (this: Scope, scope: Scope) => Promise<T>,
         ]);
+  const telemetryClient =
+    options?.parent?.telemetryClient ??
+    TelemetryClient.create({
+      phase: options?.phase ?? "up",
+      enabled: options?.telemetry ?? true,
+      quiet: options?.quiet ?? false,
+    });
   const _scope = new Scope({
     ...options,
+    parent: options?.parent,
     scopeName: id,
+    telemetryClient,
   });
+  let noop = options?.noop ?? false;
   try {
     if (options?.isResource !== true && _scope.parent) {
       // TODO(sam): this is an awful hack to differentiate between naked scopes and resources
@@ -337,6 +377,7 @@ async function run<T>(
         [ResourceKind]: Scope.KIND,
         [ResourceScope]: _scope,
         [ResourceSeq]: seq,
+        [DestroyStrategy]: options?.destroyStrategy ?? "sequential",
       } as const;
       const resource = {
         kind: Scope.KIND,
@@ -363,12 +404,16 @@ async function run<T>(
     }
     return await _scope.run(async () => fn.bind(_scope)(_scope));
   } catch (error) {
-    if (!(error instanceof DestroyedSignal)) {
-      console.log(error);
+    if (!(isDestroyedSignal(error) || isReplacedSignal(error))) {
       _scope.fail();
+    }
+    if (isDestroyedSignal(error)) {
+      noop = noop || error.noop;
     }
     throw error;
   } finally {
-    await _scope.finalize();
+    await _scope.finalize({
+      noop,
+    });
   }
 }

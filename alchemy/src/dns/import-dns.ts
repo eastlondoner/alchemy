@@ -1,6 +1,7 @@
-import type { Context } from "../context.js";
-import { Resource } from "../resource.js";
-import { DEFAULT_RECORD_TYPES, type DnsRecordType } from "./record.js";
+import type { Context } from "../context.ts";
+import { Resource } from "../resource.ts";
+import { logger } from "../util/logger.ts";
+import { DEFAULT_RECORD_TYPES, type DnsRecordType } from "./record.ts";
 
 /**
  * DNS record response structure from Cloudflare DNS API
@@ -61,9 +62,7 @@ export interface ImportDnsRecordsProps {
 /**
  * Output returned after DNS records import
  */
-export interface ImportDnsRecords
-  extends Resource<"dns::ImportDnsRecords">,
-    ImportDnsRecordsProps {
+export interface ImportDnsRecords extends ImportDnsRecordsProps {
   /**
    * The DNS records as a flat array, directly compatible with DnsRecords function
    */
@@ -133,7 +132,7 @@ export const ImportDnsRecords = Resource(
   "dns::ImportDnsRecords",
   async function (
     this: Context<ImportDnsRecords>,
-    id: string,
+    _id: string,
     props: ImportDnsRecordsProps,
   ): Promise<ImportDnsRecords> {
     // For delete phase, just return destroyed state since this is a read-only resource
@@ -195,7 +194,7 @@ export const ImportDnsRecords = Resource(
           allRecords.push(...compatRecords);
         }
       } catch (error) {
-        console.warn(
+        logger.warn(
           `Failed to fetch ${type} records for ${props.domain}:`,
           error,
         );
@@ -203,11 +202,11 @@ export const ImportDnsRecords = Resource(
     }
 
     // Return the resource with fetched records as a flat array
-    return this({
+    return {
       domain: props.domain,
       recordTypes: [...recordTypes],
       records: allRecords,
       importedAt: Date.now(),
-    });
+    };
   },
 );

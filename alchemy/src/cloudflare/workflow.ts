@@ -1,5 +1,6 @@
-import { handleApiError } from "./api-error.js";
-import type { CloudflareApi } from "./api.js";
+import { handleApiError } from "./api-error.ts";
+import type { CloudflareApi } from "./api.ts";
+import type { Binding } from "./bindings.ts";
 
 export interface WorkflowProps {
   /**
@@ -18,27 +19,65 @@ export interface WorkflowProps {
    * @default - workflowName if provided, otherwise id
    */
   className?: string;
+  /**
+   * Name of the script containing the workflow implementation
+   *
+   * @default - bound worker script
+   */
+  scriptName?: string;
+  dev?: {
+    /**
+     * Whether to run the workflow remotely instead of locally
+     * @default false
+     */
+    remote?: boolean;
+  };
 }
 
-export class Workflow<PARAMS = unknown> {
-  public readonly type = "workflow";
+export type Workflow<PARAMS = unknown> = {
+  type: "workflow";
   /**
    * Phantom property to preserve workflow params at the type level.
-   *
    * No value exists.
    */
-  public readonly _PARAMS: PARAMS = undefined!;
+  _PARAMS: PARAMS;
+  id: string;
+  workflowName: string;
+  className: string;
+  scriptName?: string;
+};
 
-  public readonly workflowName: string;
-  public readonly className: string;
+export function isWorkflow(binding: Binding): binding is Workflow {
+  return typeof binding === "object" && binding.type === "workflow";
+}
 
-  constructor(
-    public readonly id: string,
-    props: WorkflowProps = {},
-  ) {
-    this.workflowName = props.workflowName ?? props.className ?? id;
-    this.className = props.className ?? this.workflowName;
-  }
+/**
+ * Creates a workflow binding for orchestrating and automating tasks.
+ *
+ * @example
+ * ```ts
+ * // Create a basic workflow
+ * const workflow = Workflow("my-workflow", {
+ *   workflowName: "my-workflow",
+ *   className: "MyWorkflow"
+ * });
+ * ```
+ */
+export function Workflow<PARAMS = unknown>(
+  id: string,
+  props: WorkflowProps = {},
+): Workflow<PARAMS> {
+  const workflowName = props.workflowName ?? props.className ?? id;
+  const className = props.className ?? workflowName;
+
+  return {
+    type: "workflow",
+    _PARAMS: undefined!,
+    id,
+    workflowName,
+    className,
+    scriptName: props.scriptName,
+  };
 }
 
 export interface WorkflowMetadata {
