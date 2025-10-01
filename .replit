@@ -1,4 +1,4 @@
-modules = ["bun-1.22", "web", "bash", "nodejs-20"]
+modules = ["bun-1.2", "bash"]
 
 [agent]
 expertMode = true
