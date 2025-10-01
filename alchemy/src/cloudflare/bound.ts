@@ -25,7 +25,7 @@ import type { AnalyticsEngineDataset as _AnalyticsEngineDataset } from "./analyt
 import type { Assets } from "./assets.ts";
 import type { Binding, Json, Self } from "./bindings.ts";
 import type { BrowserRendering } from "./browser-rendering.ts";
-import type { R2Bucket as _R2Bucket } from "./bucket.ts";
+import type { R2Bucket as _R2Bucket } from "./r2-bucket.ts";
 import type { Container as _Container } from "./container.ts";
 import type { D1Database as _D1Database } from "./d1-database.ts";
 import type { DurableObjectNamespace as _DurableObjectNamespace } from "./durable-object-namespace.ts";

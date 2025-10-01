@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { Ai } from "../../src/cloudflare/ai.ts";
-import { R2Bucket } from "../../src/cloudflare/bucket.ts";
+import { R2Bucket } from "../../src/cloudflare/r2-bucket.ts";
 import { D1Database } from "../../src/cloudflare/d1-database.ts";
 import { DurableObjectNamespace } from "../../src/cloudflare/durable-object-namespace.ts";
 import { KVNamespace } from "../../src/cloudflare/kv-namespace.ts";
@@ -499,10 +499,13 @@ describe("WranglerJson Resource", () => {
         await fs.mkdir(tempDir, { recursive: true });
         await fs.writeFile(entrypoint, esmWorkerScript);
 
-        const r2Bucket = await R2Bucket(`${BRANCH_PREFIX}-test-r2-bucket`, {
-          name: `${BRANCH_PREFIX}-test-r2-bucket`,
-          adopt: true,
-        });
+        const r2Bucket = await R2Bucket(
+          `${BRANCH_PREFIX}-test-r2-bucket-preview`,
+          {
+            name: `${BRANCH_PREFIX}-test-r2-bucket-preview`,
+            adopt: true,
+          },
+        );
 
         const worker = await Worker(name, {
           name,
@@ -537,11 +540,14 @@ describe("WranglerJson Resource", () => {
         await fs.mkdir(tempDir, { recursive: true });
         await fs.writeFile(entrypoint, esmWorkerScript);
 
-        const r2Bucket = await R2Bucket(`${BRANCH_PREFIX}-test-r2-bucket`, {
-          name: `${BRANCH_PREFIX}-test-r2-bucket`,
-          jurisdiction: "eu",
-          adopt: true,
-        });
+        const r2Bucket = await R2Bucket(
+          `${BRANCH_PREFIX}-test-r2-bucket-jurisdiction`,
+          {
+            name: `${BRANCH_PREFIX}-test-r2-bucket-jurisdiction`,
+            jurisdiction: "eu",
+            adopt: true,
+          },
+        );
 
         const worker = await Worker(name, {
           name,
@@ -797,7 +803,7 @@ describe("WranglerJson Resource", () => {
         max_batch_size: 25,
         max_concurrency: 5,
         max_retries: 3,
-        max_wait_time_ms: 1500,
+        max_batch_timeout: 1.5,
         retry_delay: 45,
       });
     } finally {

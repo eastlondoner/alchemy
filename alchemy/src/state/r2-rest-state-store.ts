@@ -4,7 +4,7 @@ import {
   type CloudflareApiOptions,
   createCloudflareApi,
 } from "../cloudflare/api.ts";
-import { deleteObject, getObject, putObject } from "../cloudflare/bucket.ts";
+import { deleteObject, getObject, putObject } from "../cloudflare/r2-bucket.ts";
 import { ResourceScope } from "../resource.ts";
 import type { Scope } from "../scope.ts";
 import { deserialize, serialize } from "../serde.ts";
@@ -68,7 +68,9 @@ export class R2RestStateStore implements StateStore {
   async init(): Promise<void> {
     if (this.initialized) return;
 
-    const { createBucket, getBucket } = await import("../cloudflare/bucket.ts");
+    const { createBucket, getBucket } = await import(
+      "../cloudflare/r2-bucket.ts"
+    );
 
     // Create Cloudflare API client with automatic account discovery
     this.api = await createCloudflareApi(this.options);

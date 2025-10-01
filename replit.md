@@ -12,7 +12,6 @@ This is the Alchemy monorepo containing:
 - Core library built successfully
 - Documentation site running on port 5000 via VitePress
 - Deployment configured for production
-- VitePress configured for Replit proxy environment
 
 ## Project Architecture
 - **Build System**: TypeScript with Bun package manager

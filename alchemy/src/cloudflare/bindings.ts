@@ -9,7 +9,7 @@ import type { AnalyticsEngineDataset } from "./analytics-engine.ts";
 import type { Assets } from "./assets.ts";
 import type { Bound } from "./bound.ts";
 import type { BrowserRendering } from "./browser-rendering.ts";
-import type { R2Bucket, R2BucketJurisdiction } from "./bucket.ts";
+import type { R2Bucket, R2BucketJurisdiction } from "./r2-bucket.ts";
 import type { Container } from "./container.ts";
 import type { D1Database } from "./d1-database.ts";
 import type { DispatchNamespace } from "./dispatch-namespace.ts";
