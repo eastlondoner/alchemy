@@ -15,15 +15,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Documentation Server"
+args = "Documentation Preview"
 
 [[workflows.workflow]]
-name = "Documentation Server"
+name = "Documentation Preview"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd alchemy-web && bun run docs:dev"
+args = "cd alchemy-web && bun run astro preview --host 0.0.0.0 --port 5000"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
@@ -32,6 +32,10 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 42577
+externalPort = 3000
 
 [deployment]
 deploymentTarget = "autoscale"
