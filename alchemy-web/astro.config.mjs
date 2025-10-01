@@ -14,6 +14,14 @@ export default defineConfig({
   site: "https://alchemy.run",
   prefetch: true,
   trailingSlash: "ignore",
+  vite: {
+    server: {
+      allowedHosts: true,  // Allow all hosts for Replit proxy
+    },
+    preview: {
+      allowedHosts: true,  // Allow all hosts for preview server
+    }
+  },
   integrations: [
     sitemap({
       filter: (page) =>
