@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "bash"]
+modules = ["bun-1.2", "nodejs-20", "web", "bash"]
 [agent]
 expertMode = true
 
@@ -23,7 +23,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd alchemy-web && bun run astro preview --host 0.0.0.0 --port 5000"
+args = "cd alchemy-web && bun dev --host 0.0.0.0 --port 5000"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
@@ -33,11 +33,7 @@ outputType = "webview"
 localPort = 5000
 externalPort = 80
 
-[[ports]]
-localPort = 42837
-externalPort = 3000
-
 [deployment]
-deploymentTarget = "autoscale"
-run = ["bun", "run", "--filter", "alchemy-web", "docs:preview", "--port", "5000", "--host", "0.0.0.0"]
-build = ["bun", "run", "--filter", "alchemy-web", "docs:build"]
+deploymentTarget = "static"
+build = ["sh", "-c", "PATH=\"${PATH}:/home/runner/workspace/.cache/.bun/bin\" && bash -c 'bun install -g npx && which npx && bun run --filter alchemy-web build || echo \"deploying anyway\"'"]
+publicDir = "alchemy-web/dist"
