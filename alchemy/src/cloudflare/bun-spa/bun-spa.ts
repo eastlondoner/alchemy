@@ -34,24 +34,32 @@ export async function BunSPA<B extends Bindings>(
     ? props.frontend.map((p) => path.resolve(p))
     : [path.resolve(props.frontend)];
 
-  const existsPromises = frontendPaths.map(p => exists(p));
-  const existsResults = await Promise.all(existsPromises);
-  const missingPaths = frontendPaths.filter((p, i) => !existsResults[i]);
-  if (missingPaths.length > 0) {
-    if (missingPaths.length === 1) {
-      throw new Error(`Frontend path ${missingPaths[0]} does not exist`);
-    }
-    throw new Error(`Frontend paths ${missingPaths.join(", ")} do not exist`);
-  }
+  // Helper to check if a path contains glob patterns
+  const isGlobPattern = (p: string) => p.includes("*") || p.includes("?") || p.includes("[") || p.includes("]");
 
-  const statsPromises = frontendPaths.map(p => fs.stat(p));
-  const statsResults = await Promise.all(statsPromises);
-  const notFiles = frontendPaths.filter((p, i) => !statsResults[i].isFile());
-  if (notFiles.length > 0) {
-    if (notFiles.length === 1) {
-      throw new Error(`Frontend path ${notFiles[0]} is not a file`);
+  // Only validate non-glob paths
+  const nonGlobPaths = frontendPaths.filter(p => !isGlobPattern(p));
+  
+  if (nonGlobPaths.length > 0) {
+    const existsPromises = nonGlobPaths.map(p => exists(p));
+    const existsResults = await Promise.all(existsPromises);
+    const missingPaths = nonGlobPaths.filter((p, i) => !existsResults[i]);
+    if (missingPaths.length > 0) {
+      if (missingPaths.length === 1) {
+        throw new Error(`Frontend path ${missingPaths[0]} does not exist`);
+      }
+      throw new Error(`Frontend paths ${missingPaths.join(", ")} do not exist`);
     }
-    throw new Error(`Frontend paths ${notFiles.join(", ")} are not files`);
+
+    const statsPromises = nonGlobPaths.map(p => fs.stat(p));
+    const statsResults = await Promise.all(statsPromises);
+    const notFiles = nonGlobPaths.filter((p, i) => !statsResults[i].isFile());
+    if (notFiles.length > 0) {
+      if (notFiles.length === 1) {
+        throw new Error(`Frontend path ${notFiles[0]} is not a file`);
+      }
+      throw new Error(`Frontend paths ${notFiles.join(", ")} are not files`);
+    }
   }
 
   const outDir = path.resolve(props.outDir ?? "dist/client");
