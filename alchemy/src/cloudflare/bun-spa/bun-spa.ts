@@ -44,7 +44,7 @@ export async function BunSPA<B extends Bindings>(
   if (nonGlobPaths.length > 0) {
     const existsPromises = nonGlobPaths.map((p) => exists(p));
     const existsResults = await Promise.all(existsPromises);
-    const missingPaths = nonGlobPaths.filter((p, i) => !existsResults[i]);
+    const missingPaths = nonGlobPaths.filter((_p, i) => !existsResults[i]);
     if (missingPaths.length > 0) {
       if (missingPaths.length === 1) {
         throw new Error(`Frontend path ${missingPaths[0]} does not exist`);
@@ -54,7 +54,7 @@ export async function BunSPA<B extends Bindings>(
 
     const statsPromises = nonGlobPaths.map((p) => fs.stat(p));
     const statsResults = await Promise.all(statsPromises);
-    const notFiles = nonGlobPaths.filter((p, i) => !statsResults[i].isFile());
+    const notFiles = nonGlobPaths.filter((_, i) => !statsResults[i].isFile());
     if (notFiles.length > 0) {
       if (notFiles.length === 1) {
         throw new Error(`Frontend path ${notFiles[0]} is not a file`);
