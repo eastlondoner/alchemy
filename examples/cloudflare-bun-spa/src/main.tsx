@@ -9,6 +9,8 @@ createRoot(document.getElementById("root")!).render(
   </StrictMode>,
 );
 
+// @ts-expect-error this is a dev only feature
 if (import.meta.hot) {
+  // @ts-expect-error this is a dev only feature
   import.meta.hot.accept();
 }
