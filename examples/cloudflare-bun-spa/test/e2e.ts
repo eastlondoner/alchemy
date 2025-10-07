@@ -16,10 +16,13 @@ export async function test({
 
   await pollUntilReady(url);
   // This is true for local dev tests but not for remote e2e tests
-  console.error("ALCHEMY_TEST_KILL_ON_FINALIZE", process.env.ALCHEMY_TEST_KILL_ON_FINALIZE);
+  console.error(
+    "ALCHEMY_TEST_KILL_ON_FINALIZE",
+    process.env.ALCHEMY_TEST_KILL_ON_FINALIZE,
+  );
   if (process.env.ALCHEMY_TEST_KILL_ON_FINALIZE) {
     console.error("Polling for apiUrl", apiUrl);
-    await pollUntilReady(apiUrl, 404)
+    await pollUntilReady(apiUrl, 404);
   } else {
     // In dev the apiUrl should return 404 on the base path
     // in production deployments
