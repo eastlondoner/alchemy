@@ -64,6 +64,19 @@ export async function test({
     "Website HTML header is not correct",
   );
 
+  const aboutPageFound = await fetchAndExpectOK(`${url}/about`, undefined, 200);
+  assert.equal(aboutPageFound.status, 200, "About page is not found");
+  assert.equal(
+    await aboutPageFound.headers.get("content-type"),
+    "text/html;charset=utf-8",
+    "About page header is not correct",
+  );
+  const aboutContent = await aboutPageFound.text();
+  assert(
+    aboutContent.includes("About Bun + React + TS"),
+    "About page content is not correct",
+  );
+
   console.log("Vite E2E test passed");
 }
 

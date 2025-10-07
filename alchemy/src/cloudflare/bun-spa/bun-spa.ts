@@ -15,7 +15,12 @@ import {
 } from "../website.ts";
 
 export interface BunSPAProps<B extends Bindings> extends WebsiteProps<B> {
-  frontend: string;
+  /**
+   * The path to the frontend entrypoints that bun should bundle for deployment & serve in dev mode.
+   * These are usually html files. Glob patterns are supported.
+   * Typically set to index.html
+   */
+  frontend: string | string[];
   outDir?: string;
 }
 
@@ -25,15 +30,30 @@ export async function BunSPA<B extends Bindings>(
   id: string,
   props: BunSPAProps<B>,
 ): Promise<BunSPA<B> & { apiUrl: string }> {
-  const frontendPath = path.resolve(props.frontend);
-  if (!(await exists(frontendPath))) {
-    throw new Error(`Frontend path ${frontendPath} does not exist`);
+  const frontendPaths = Array.isArray(props.frontend)
+    ? props.frontend.map((p) => path.resolve(p))
+    : [path.resolve(props.frontend)];
+
+  const existsPromises = frontendPaths.map(p => exists(p));
+  const existsResults = await Promise.all(existsPromises);
+  const missingPaths = frontendPaths.filter((p, i) => !existsResults[i]);
+  if (missingPaths.length > 0) {
+    if (missingPaths.length === 1) {
+      throw new Error(`Frontend path ${missingPaths[0]} does not exist`);
+    }
+    throw new Error(`Frontend paths ${missingPaths.join(", ")} do not exist`);
   }
 
-  const stats = await fs.stat(frontendPath);
-  if (!stats.isFile()) {
-    throw new Error(`Frontend path ${frontendPath} is not a file`);
+  const statsPromises = frontendPaths.map(p => fs.stat(p));
+  const statsResults = await Promise.all(statsPromises);
+  const notFiles = frontendPaths.filter((p, i) => !statsResults[i].isFile());
+  if (notFiles.length > 0) {
+    if (notFiles.length === 1) {
+      throw new Error(`Frontend path ${notFiles[0]} is not a file`);
+    }
+    throw new Error(`Frontend paths ${notFiles.join(", ")} are not files`);
   }
+
   const outDir = path.resolve(props.outDir ?? "dist/client");
 
   if (props.assets) {
@@ -58,7 +78,7 @@ export async function BunSPA<B extends Bindings>(
     },
     build: spreadBuildProps(
       props,
-      `bun build '${frontendPath}' --outdir ${outDir}`,
+      `bun build '${frontendPaths.join("' '")}' --outdir ${outDir}`,
     ),
   });
 
@@ -67,9 +87,10 @@ export async function BunSPA<B extends Bindings>(
   if (scope.local) {
     const cwd = props.cwd ?? process.cwd();
     await validateBunfigToml(cwd);
+    const frontendPathsRelativeToCwd = frontendPaths.map(p => path.relative(cwd, p));
     const dev = spreadDevProps(
       props,
-      `bun '${path.relative(cwd, frontendPath)}'`,
+      `bun '${frontendPathsRelativeToCwd.join("' '")}'`,
     );
     const secrets = props.wrangler?.secrets ?? !props.wrangler?.path;
     const env = {
