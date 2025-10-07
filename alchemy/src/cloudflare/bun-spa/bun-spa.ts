@@ -35,13 +35,14 @@ export async function BunSPA<B extends Bindings>(
     : [path.resolve(props.frontend)];
 
   // Helper to check if a path contains glob patterns
-  const isGlobPattern = (p: string) => p.includes("*") || p.includes("?") || p.includes("[") || p.includes("]");
+  const isGlobPattern = (p: string) =>
+    p.includes("*") || p.includes("?") || p.includes("[") || p.includes("]");
 
   // Only validate non-glob paths
-  const nonGlobPaths = frontendPaths.filter(p => !isGlobPattern(p));
-  
+  const nonGlobPaths = frontendPaths.filter((p) => !isGlobPattern(p));
+
   if (nonGlobPaths.length > 0) {
-    const existsPromises = nonGlobPaths.map(p => exists(p));
+    const existsPromises = nonGlobPaths.map((p) => exists(p));
     const existsResults = await Promise.all(existsPromises);
     const missingPaths = nonGlobPaths.filter((p, i) => !existsResults[i]);
     if (missingPaths.length > 0) {
@@ -51,7 +52,7 @@ export async function BunSPA<B extends Bindings>(
       throw new Error(`Frontend paths ${missingPaths.join(", ")} do not exist`);
     }
 
-    const statsPromises = nonGlobPaths.map(p => fs.stat(p));
+    const statsPromises = nonGlobPaths.map((p) => fs.stat(p));
     const statsResults = await Promise.all(statsPromises);
     const notFiles = nonGlobPaths.filter((p, i) => !statsResults[i].isFile());
     if (notFiles.length > 0) {
@@ -95,7 +96,9 @@ export async function BunSPA<B extends Bindings>(
   if (scope.local) {
     const cwd = props.cwd ?? process.cwd();
     await validateBunfigToml(cwd);
-    const frontendPathsRelativeToCwd = frontendPaths.map(p => path.relative(cwd, p));
+    const frontendPathsRelativeToCwd = frontendPaths.map((p) =>
+      path.relative(cwd, p),
+    );
     const dev = spreadDevProps(
       props,
       `bun '${frontendPathsRelativeToCwd.join("' '")}'`,
