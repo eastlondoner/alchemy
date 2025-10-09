@@ -31,6 +31,7 @@ export interface Tunnel {
 
 export async function createTunnel(
   miniflare: miniflare.Miniflare,
+  tunnelProps?: { tunnelToken: string },
 ): Promise<Tunnel> {
   const workers = new Set<string>(); // used to avoid exposing workers that are not running with tunneling enabled
   const proxy = await createMiniflareWorkerProxy({
@@ -62,9 +63,12 @@ export async function createTunnel(
       return name;
     },
   });
+  const cmd = tunnelProps?.tunnelToken
+    ? `cloudflared tunnel --token ${tunnelProps.tunnelToken} --url ${proxy.url.toString()}`
+    : `cloudflared tunnel --url ${proxy.url.toString()}`;
   const remoteUrlString = await Scope.current.spawn("tunnel", {
     processName: `cloudflared-${proxy.url.port}`,
-    cmd: `cloudflared tunnel --url ${proxy.url.toString()}`,
+    cmd,
     quiet: !process.env.DEBUG,
     extract: (line) => {
       const match = line.match(/https:\/\/([^\s]+)\.trycloudflare\.com/);

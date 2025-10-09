@@ -47,11 +47,22 @@ export class MiniflareController {
     const miniflare = await this.update();
     let url: URL;
     if (input.tunnel) {
-      this.tunnel ??= await createTunnel(miniflare);
-      url = await this.tunnel.configureWorker({
-        api: input.api,
-        name: input.name,
-      });
+      if (typeof input.tunnel === "boolean") {
+        this.tunnel ??= await createTunnel(miniflare);
+        url = await this.tunnel.configureWorker({
+          api: input.api,
+          name: input.name,
+        });
+      } else {
+        // it's a tunnel resource
+        this.tunnel ??= await createTunnel(miniflare, {
+          tunnelToken: input.tunnel.token.unencrypted,
+        });
+        url = await this.tunnel.configureWorker({
+          api: input.api,
+          name: input.name,
+        });
+      }
     } else {
       const proxy = await createMiniflareWorkerProxy({
         port: input.port ?? (await findOpenPort()),
