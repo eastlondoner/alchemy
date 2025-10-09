@@ -60,9 +60,9 @@ import { Workflow, isWorkflow, upsertWorkflow } from "./workflow.ts";
 // This import is here to avoid errors when destroying the `Bundle` resource.
 import "../esbuild/bundle.ts";
 import { Scope } from "../scope.ts";
+import type { Tunnel } from "./tunnel.ts";
 import type { WorkerRef } from "./worker-ref.ts";
 import { createEmptyWorker, exists } from "./worker-stub.ts";
-import type { Tunnel } from "./tunnel.ts";
 
 /**
  * Configuration options for static assets
@@ -962,12 +962,7 @@ const _Worker = Resource(
     const bundle = options.bundle.value;
     const api = await createCloudflareApi(props);
 
-    // Use miniflare (local) when:
-    // 1. In local scope AND remote is not true, OR
-    // 2. A tunnel is specified (tunnels require local worker with remote exposure)
-    const useLocal = this.scope.local && (!props.dev?.remote || props.dev?.tunnel || this.scope.tunnel);
-    
-    if (useLocal) {
+    if (this.scope.local && !props.dev?.remote) {
       let url: string | undefined;
       if (props.dev?.url) {
         url = props.dev.url;

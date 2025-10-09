@@ -54,9 +54,14 @@ export class MiniflareController {
           name: input.name,
         });
       } else {
+        // I tried to enforce this in the type system but it was too complex
+        if(!input.port) {
+          throw new Error("An explicit local port is necessary to use a named tunnel in dev mode");
+        }
         // it's a tunnel resource
         this.tunnel ??= await createTunnel(miniflare, {
-          tunnelToken: input.tunnel.token.unencrypted,
+          tunnel: input.tunnel,
+          port: input.port
         });
         url = await this.tunnel.configureWorker({
           api: input.api,
