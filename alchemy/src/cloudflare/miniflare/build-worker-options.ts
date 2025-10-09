@@ -14,6 +14,7 @@ import { isQueueEventSource, type EventSource } from "../event-source.ts";
 import type { WorkerBundle, WorkerBundleSource } from "../worker-bundle.ts";
 import type { AssetsConfig } from "../worker.ts";
 import { createRemoteProxyWorker } from "./remote-binding-proxy.ts";
+import type { DevTunnelRoute } from "../dev-tunnel.ts";
 
 export interface MiniflareWorkerInput {
   api: CloudflareApi;
@@ -26,7 +27,7 @@ export interface MiniflareWorkerInput {
   assets: AssetsConfig | undefined;
   bundle: WorkerBundleSource;
   port: number | undefined;
-  tunnel: boolean | undefined;
+  tunnel: DevTunnelRoute | "ProxyTunnel" | undefined;
   cwd: string;
 }
 

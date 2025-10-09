@@ -60,6 +60,7 @@ import { Workflow, isWorkflow, upsertWorkflow } from "./workflow.ts";
 // This import is here to avoid errors when destroying the `Bundle` resource.
 import "../esbuild/bundle.ts";
 import { Scope } from "../scope.ts";
+import type { DevTunnelRoute } from "./dev-tunnel.ts";
 import type { WorkerRef } from "./worker-ref.ts";
 import { createEmptyWorker, exists } from "./worker-stub.ts";
 
@@ -344,7 +345,7 @@ export interface BaseWorkerProps<
          *
          * @default false
          */
-        tunnel?: boolean;
+        tunnel?: boolean | DevTunnelRoute<any>;
         url?: undefined;
       }
     | {
@@ -981,7 +982,7 @@ const _Worker = Resource(
           assets: props.assets,
           bundle,
           port: props.dev?.port,
-          tunnel: props.dev?.tunnel ?? this.scope.tunnel,
+          tunnel: getTunnelType(props.dev?.tunnel ?? this.scope.tunnel),
           cwd: props.cwd ?? process.cwd(),
         });
         this.onCleanup(() => controller.dispose());
@@ -1776,4 +1777,16 @@ async function getVersionMetadata(
     };
   };
   return result.result;
+}
+
+function getTunnelType(
+  tunnel: boolean | DevTunnelRoute | undefined,
+): "ProxyTunnel" | DevTunnelRoute | undefined {
+  if (!tunnel) {
+    return undefined;
+  }
+  if (typeof tunnel === "boolean") {
+    return tunnel ? "ProxyTunnel" : undefined;
+  }
+  return tunnel;
 }

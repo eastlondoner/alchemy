@@ -3,6 +3,8 @@ import { Scope } from "../../scope.ts";
 import { findOpenPort } from "../../util/find-open-port.ts";
 import type { CloudflareApi } from "../api.ts";
 import { getInternalWorkerBundle } from "../bundle/internal-worker-bundle.ts";
+import type { DevTunnelRoute } from "../dev-tunnel.ts";
+import { Tunnel as TunnelResource } from "../tunnel.ts";
 import {
   enableWorkerSubdomain,
   getAccountSubdomain,
@@ -17,11 +19,12 @@ import {
 export interface Tunnel {
   /**
    * Enables tunneling for a local worker.
-   * Returns a `workers.dev` URL that can be used to access the worker.
+   * Returns a URL that can be used to access the worker - either a .workers.dev URL if using a quick tunnel or a customer's hostname if using a named tunnel
    */
   configureWorker: (input: {
     api: CloudflareApi;
     name: string;
+    hostname?: string;
   }) => Promise<URL>;
   /**
    * Closes the tunnel.
@@ -29,7 +32,59 @@ export interface Tunnel {
   close: () => Promise<void>;
 }
 
-export async function createTunnel(
+export async function createNamedTunnel(
+  miniflare: miniflare.Miniflare,
+  tunnel: DevTunnelRoute,
+): Promise<Tunnel> {
+  // maps hostname to worker name
+  const workers = new Map<string, string>(); // used to avoid exposing workers that are not running with tunneling enabled
+  const proxy = await createMiniflareWorkerProxy({
+    port: await findOpenPort(9977), // alchemy auth uses 9976, so one above that
+    miniflare,
+    mode: "remote",
+    transformRequest: (request) => {
+      request.url.protocol = proxy.url.protocol;
+      request.url.host = proxy.url.host;
+      request.url.hostname = proxy.url.hostname;
+      request.url.port = proxy.url.port;
+      request.headers.set("host", proxy.url.host);
+    },
+    getWorkerName: (request) => {
+      const hostname = request.url.hostname;
+      if (!hostname) {
+        throw new MiniflareWorkerProxyError(
+          "Hostname is missing from request URL. This indicates a bug in Alchemy.",
+          530,
+        );
+      }
+      const name = workers.get(hostname);
+      if (!name) {
+        throw new MiniflareWorkerProxyError(
+          `The hostname "${hostname}" is not running with tunneling enabled.`,
+          530,
+        );
+      }
+      return name;
+    },
+  });
+  tunnel.tunnel.setPort(proxy.url.port);
+  const realTunnel = await TunnelResource(tunnel.tunnel.id, tunnel.tunnel);
+  await Scope.current.spawn("tunnel", {
+    processName: `cloudflared-${tunnel.tunnel.name}`,
+    cmd: `cloudflared tunnel run --token ${realTunnel.token.unencrypted}`,
+    quiet: !process.env.DEBUG,
+  });
+  return {
+    configureWorker: async (input) => {
+      workers.set(input.hostname!, input.name);
+      return new URL(`https://${tunnel.hostname}`);
+    },
+    close: async () => {
+      // nothing to do
+    },
+  };
+}
+export async function createProxyTunnel(
   miniflare: miniflare.Miniflare,
 ): Promise<Tunnel> {
   const workers = new Set<string>(); // used to avoid exposing workers that are not running with tunneling enabled
@@ -41,6 +96,7 @@ export async function createTunnel(
       if (request.url.origin === remote.origin) {
         request.url.protocol = proxy.url.protocol;
         request.url.host = proxy.url.host;
+        request.url.hostname = proxy.url.hostname;
         request.url.port = proxy.url.port;
         request.headers.set("host", proxy.url.host);
       }

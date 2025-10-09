@@ -15,7 +15,7 @@ import {
   type MiniflareWorkerProxy,
 } from "./miniflare-worker-proxy.ts";
 import { getDefaultPersistPath } from "./paths.ts";
-import { createTunnel, type Tunnel } from "./tunnel.ts";
+import { createNamedTunnel, createProxyTunnel, type Tunnel } from "./tunnel.ts";
 
 declare global {
   var ALCHEMY_MINIFLARE_CONTROLLER: MiniflareController | undefined;
@@ -46,15 +46,25 @@ export class MiniflareController {
     this.options.set(input.name, first.value);
     const miniflare = await this.update();
     let url: URL;
+    const port = input.port ?? (await findOpenPort());
     if (input.tunnel) {
-      this.tunnel ??= await createTunnel(miniflare);
-      url = await this.tunnel.configureWorker({
-        api: input.api,
-        name: input.name,
-      });
+      if (input.tunnel === "ProxyTunnel") {
+        this.tunnel ??= await createProxyTunnel(miniflare);
+        url = await this.tunnel.configureWorker({
+          api: input.api,
+          name: input.name,
+        });
+      } else {
+        this.tunnel ??= await createNamedTunnel(miniflare, input.tunnel!);
+        url = await this.tunnel.configureWorker({
+          api: input.api,
+          name: input.name,
+          hostname: input.tunnel.hostname,
+        });
+      }
     } else {
       const proxy = await createMiniflareWorkerProxy({
-        port: input.port ?? (await findOpenPort()),
+        port,
         getWorkerName: () => input.name,
         miniflare,
         mode: "local",

@@ -46,9 +46,8 @@ export async function createMiniflareWorkerProxy(options: {
     req: http.IncomingMessage,
   ): Promise<miniflare.Response> => {
     const info = parseIncomingMessage(req);
-    options.transformRequest?.(info);
-
     const name = options.getWorkerName(info);
+    options.transformRequest?.(info);
     info.headers.set("MF-Route-Override", name);
 
     // Handle scheduled events.

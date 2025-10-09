@@ -70,7 +70,7 @@ export async function BunSPA<B extends Bindings>(
   }
 
   const scope = Scope.current;
-  console.log("creating website", outDir);
+
   const website = await Website(id, {
     spa: true,
     ...props,
