@@ -962,7 +962,12 @@ const _Worker = Resource(
     const bundle = options.bundle.value;
     const api = await createCloudflareApi(props);
 
-    if (this.scope.local && !props.dev?.remote) {
+    // Use miniflare (local) when:
+    // 1. In local scope AND remote is not true, OR
+    // 2. A tunnel is specified (tunnels require local worker with remote exposure)
+    const useLocal = this.scope.local && (!props.dev?.remote || props.dev?.tunnel || this.scope.tunnel);
+    
+    if (useLocal) {
       let url: string | undefined;
       if (props.dev?.url) {
         url = props.dev.url;
