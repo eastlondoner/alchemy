@@ -596,6 +596,14 @@ export const Tunnel = Resource(
       }
     }
 
+    // Ensure we have a token - fetch it if not present in tunnel data
+    if (!tunnelData.token) {
+      const token = await getTunnelToken(api, tunnelData.id);
+      if (token) {
+        tunnelData.token = token;
+      }
+    }
+
     // Handle DNS records for ingress hostnames
     let dnsRecords = this.output?.dnsRecords || {};
 
@@ -743,6 +751,30 @@ export async function getTunnelConfiguration(
 }
 
 /**
+ * Get tunnel token
+ * @internal
+ */
+export async function getTunnelToken(
+  api: CloudflareApi,
+  tunnelId: string,
+): Promise<string | null> {
+  const response = await api.get(
+    `/accounts/${api.accountId}/cfd_tunnel/${tunnelId}/token`,
+  );
+
+  if (!response.ok) {
+    // Token endpoint might not exist for all tunnels, return null instead of throwing
+    if (response.status === 404) {
+      return null;
+    }
+    await handleApiError(response, "get token", "tunnel", tunnelId);
+  }
+
+  const data = (await response.json()) as CloudflareApiResponse<string>;
+  return data.result;
+}
+
+/**
  * Delete a tunnel
  * @internal
  */
@@ -796,6 +828,20 @@ async function createTunnel(
 
   const data =
     (await response.json()) as CloudflareApiResponse<CloudflareTunnel>;
+
+  // Fetch the token if not included in the response
+  if (!data.result.token && data.result.id) {
+    const tokenResponse = await api.get(
+      `/accounts/${api.accountId}/cfd_tunnel/${data.result.id}/token`,
+    );
+
+    if (tokenResponse.ok) {
+      const tokenData =
+        (await tokenResponse.json()) as CloudflareApiResponse<string>;
+      data.result.token = tokenData.result;
+    }
+  }
+
   return data.result;
 }
 
