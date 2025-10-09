@@ -62,6 +62,7 @@ import "../esbuild/bundle.ts";
 import { Scope } from "../scope.ts";
 import type { WorkerRef } from "./worker-ref.ts";
 import { createEmptyWorker, exists } from "./worker-stub.ts";
+import type { Tunnel } from "./tunnel.ts";
 
 /**
  * Configuration options for static assets
@@ -344,7 +345,7 @@ export interface BaseWorkerProps<
          *
          * @default false
          */
-        tunnel?: boolean;
+        tunnel?: boolean | Tunnel;
         url?: undefined;
       }
     | {
