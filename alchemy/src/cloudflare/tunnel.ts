@@ -117,6 +117,20 @@ export interface TunnelProps extends CloudflareApiOptions {
    * @default true
    */
   delete?: boolean;
+
+  /**
+   * Development mode configuration
+   */
+  dev?: {
+    /**
+     * Whether to use a remote tunnel in development mode
+     * If true, creates a real Cloudflare tunnel even in local scope
+     * If false or undefined, uses mock data in local scope
+     *
+     * @default false
+     */
+    remote?: boolean;
+  };
 }
 
 /**
@@ -318,6 +332,16 @@ export interface Tunnel extends Omit<TunnelProps, "delete" | "tunnelSecret"> {
   token: Secret<string>;
 
   /**
+   * Development mode configuration
+   */
+  dev?: {
+    /**
+     * Whether to use a remote tunnel in development mode
+     */
+    remote?: boolean;
+  };
+
+  /**
    * DNS records automatically created for hostnames in ingress rules
    * Maps hostname to DNS record ID
    * @internal
@@ -480,6 +504,42 @@ export interface Tunnel extends Omit<TunnelProps, "delete" | "tunnelSecret"> {
  *   ]
  * });
  * // Then create DNS records separately with custom configuration
+ *
+ * @example
+ * // In local development mode, tunnels use mock data by default
+ * // This avoids creating real Cloudflare resources during dev
+ * const localTunnel = await Tunnel("local-dev", {
+ *   name: "local-dev-tunnel",
+ *   ingress: [
+ *     {
+ *       hostname: "dev.example.com",
+ *       service: "http://localhost:3000"
+ *     },
+ *     {
+ *       service: "http_status:404"
+ *     }
+ *   ]
+ * });
+ * // Returns mock credentials and token in local scope
+ *
+ * @example
+ * // To create a real tunnel even in local development mode
+ * const remoteTunnel = await Tunnel("remote-dev", {
+ *   name: "remote-dev-tunnel",
+ *   dev: {
+ *     remote: true  // Force real tunnel creation in dev mode
+ *   },
+ *   ingress: [
+ *     {
+ *       hostname: "dev.example.com",
+ *       service: "http://localhost:3000"
+ *     },
+ *     {
+ *       service: "http_status:404"
+ *     }
+ *   ]
+ * });
+ * // Creates real Cloudflare tunnel even in local scope
  */
 export const Tunnel = Resource(
   "cloudflare::Tunnel",
@@ -488,11 +548,41 @@ export const Tunnel = Resource(
     id: string,
     props: TunnelProps,
   ): Promise<Tunnel> {
-    // Create Cloudflare API client with automatic account discovery
-    const api = await createCloudflareApi(props);
-
     const name =
       props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
+
+    // Check if we're in local scope and should use mock data
+    const local = this.scope.local && !props.dev?.remote;
+    const dev = {
+      remote: props.dev?.remote ?? false,
+    };
+
+    if (local) {
+      logger.log(`Using local mock tunnel for ${name}`);
+      return {
+        tunnelId: this.output?.tunnelId ?? "",
+        accountTag: this.output?.accountTag ?? "",
+        name,
+        createdAt: this.output?.createdAt ?? new Date().toISOString(),
+        deletedAt: null,
+        credentials: this.output?.credentials ?? {
+          accountTag: "",
+          tunnelId: "",
+          tunnelName: name,
+          tunnelSecret: props.tunnelSecret ?? alchemy.secret("mock-secret"),
+        },
+        token: this.output?.token ?? alchemy.secret("mock-token"),
+        metadata: props.metadata,
+        ingress: props.ingress,
+        warpRouting: props.warpRouting,
+        originRequest: props.originRequest,
+        configSrc: props.configSrc,
+        dev,
+      };
+    }
+
+    // Create Cloudflare API client with automatic account discovery
+    const api = await createCloudflareApi(props);
 
     if (this.phase === "update" && this.output.name !== name) {
       console.log("replacing tunnel", this.output.name, name);
@@ -598,10 +688,20 @@ export const Tunnel = Resource(
 
     // Ensure we have a token - fetch it if not present in tunnel data
     if (!tunnelData.token) {
+      logger.log(
+        `Token missing from tunnel ${tunnelData.id}, attempting to fetch...`,
+      );
       const token = await getTunnelToken(api, tunnelData.id);
       if (token) {
         tunnelData.token = token;
+        logger.log(
+          `Token successfully retrieved and set for tunnel ${tunnelData.id}`,
+        );
+      } else {
+        logger.warn(`Could not retrieve token for tunnel ${tunnelData.id}`);
       }
+    } else {
+      logger.log(`Token already present for tunnel ${tunnelData.id}`);
     }
 
     // Handle DNS records for ingress hostnames
@@ -673,7 +773,7 @@ export const Tunnel = Resource(
     }
 
     // Transform API response to our interface
-    return {
+    const result = {
       tunnelId: tunnelData.id,
       accountTag: tunnelData.account_tag,
       name: tunnelData.name,
@@ -702,8 +802,14 @@ export const Tunnel = Resource(
       warpRouting: props.warpRouting,
       originRequest: props.originRequest,
       configSrc: props.configSrc,
+      dev,
       dnsRecords: Object.keys(dnsRecords).length > 0 ? dnsRecords : undefined,
     };
+
+    logger.log(
+      `Returning tunnel ${tunnelData.id} with token: ${tunnelData.token ? "present" : "MISSING"}`,
+    );
+    return result;
   },
 );
 
@@ -758,6 +864,7 @@ export async function getTunnelToken(
   api: CloudflareApi,
   tunnelId: string,
 ): Promise<string | null> {
+  logger.log(`Fetching token for tunnel ${tunnelId}...`);
   const response = await api.get(
     `/accounts/${api.accountId}/cfd_tunnel/${tunnelId}/token`,
   );
@@ -765,12 +872,17 @@ export async function getTunnelToken(
   if (!response.ok) {
     // Token endpoint might not exist for all tunnels, return null instead of throwing
     if (response.status === 404) {
+      logger.warn(`Token endpoint not found for tunnel ${tunnelId} (404)`);
       return null;
     }
+    logger.error(
+      `Failed to fetch token for tunnel ${tunnelId}: ${response.status} ${response.statusText}`,
+    );
     await handleApiError(response, "get token", "tunnel", tunnelId);
   }
 
   const data = (await response.json()) as CloudflareApiResponse<string>;
+  logger.log(`Successfully fetched token for tunnel ${tunnelId}`);
   return data.result;
 }
 
@@ -831,6 +943,9 @@ async function createTunnel(
 
   // Fetch the token if not included in the response
   if (!data.result.token && data.result.id) {
+    logger.log(
+      `Token not in create response for tunnel ${data.result.id}, fetching from token endpoint...`,
+    );
     const tokenResponse = await api.get(
       `/accounts/${api.accountId}/cfd_tunnel/${data.result.id}/token`,
     );
@@ -839,7 +954,16 @@ async function createTunnel(
       const tokenData =
         (await tokenResponse.json()) as CloudflareApiResponse<string>;
       data.result.token = tokenData.result;
+      logger.log(`Successfully fetched token for tunnel ${data.result.id}`);
+    } else {
+      logger.warn(
+        `Failed to fetch token for tunnel ${data.result.id}: ${tokenResponse.status} ${tokenResponse.statusText}`,
+      );
     }
+  } else if (data.result.token) {
+    logger.log(
+      `Token included in create response for tunnel ${data.result.id}`,
+    );
   }
 
   return data.result;
