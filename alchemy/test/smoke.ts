@@ -77,6 +77,8 @@ const skippedExamples = [
   "planetscale-postgres",
   "docker",
   "cloudflare-orange",
+  // Requires TEST_DOMAIN environment variable for custom domain setup
+  "cloudflare-dev-tunnel-named",
 ];
 
 // Discover examples and generate tests

@@ -16,6 +16,8 @@ This example demonstrates using named dev tunnels with multiple workers sharing 
 2. [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) must be installed
 3. Domain must be on Cloudflare (for automatic DNS record creation)
 
+> **Note:** This example is skipped in automated tests (`bun test:examples`) because it requires custom domain configuration. You can run it manually once you've set up your domain.
+
 ## Setup
 
 ```bash
