@@ -1,0 +1,14 @@
+{
+  "name": "cloudflare-dev-tunnel-named",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'No build step required'",
+    "dev": "alchemy dev --env-file ../../.env",
+    "deploy": "alchemy deploy --env-file ../../.env",
+    "destroy": "alchemy destroy --env-file ../../.env"
+  },
+  "dependencies": {
+    "alchemy": "workspace:*"
+  }
+}

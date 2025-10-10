@@ -8,6 +8,8 @@
     { "path": "./examples/aws-app/tsconfig.json" },
     { "path": "./examples/cloudflare-astro/tsconfig.json" },
     { "path": "./examples/cloudflare-container/tsconfig.json" },
+    { "path": "./examples/cloudflare-dev-tunnel-named/tsconfig.json" },
+    { "path": "./examples/cloudflare-dev-tunnel-quick/tsconfig.json" },
     { "path": "./examples/cloudflare-durable-object-websocket/tsconfig.json" },
     { "path": "./examples/cloudflare-livestore/tsconfig.json" },
     { "path": "./examples/cloudflare-nuxt-pipeline/tsconfig.json" },
