@@ -7,8 +7,10 @@ const app = await alchemy("cloudflare-dev-tunnel-named");
 const TEST_DOMAIN = process.env.TEST_DOMAIN || process.env.ALCHEMY_TEST_DOMAIN;
 
 if (!TEST_DOMAIN) {
-  if(process.env.ALCHEMY_E2E === "1") {
-    console.warn("Skipping cloudflare-dev-tunnel-named E2E test because TEST_DOMAIN or ALCHEMY_TEST_DOMAIN is not set");
+  if (process.env.ALCHEMY_E2E === "1") {
+    console.warn(
+      "Skipping cloudflare-dev-tunnel-named E2E test because TEST_DOMAIN or ALCHEMY_TEST_DOMAIN is not set",
+    );
     process.exit(0);
   }
   throw new Error("TEST_DOMAIN or ALCHEMY_TEST_DOMAIN must be set");
@@ -17,7 +19,6 @@ if (!TEST_DOMAIN) {
 // Create a named tunnel with specific hostnames
 const devTunnel = await DevTunnel("dev-tunnel", {
   name: `${app.name}-tunnel`,
-  adopt: true,
   hostnames: [`api-dev.${TEST_DOMAIN}`, `web-dev.${TEST_DOMAIN}`] as const,
 });
 

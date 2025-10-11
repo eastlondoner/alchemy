@@ -41,7 +41,6 @@ describe.skipIf(!TEST_DOMAIN)("Tunnel Resource", () => {
       devTunnel = await DevTunnel(testId, {
         name: `${testId}-initial`,
         hostnames: [devTunnelHostnameOne, devTunnelHostnameTwo],
-        adopt: true,
         warpRouting: undefined,
       });
 
