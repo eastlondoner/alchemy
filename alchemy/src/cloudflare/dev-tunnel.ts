@@ -71,11 +71,15 @@ export async function DevTunnel<const Hostnames extends string[]>(
   ];
 
   function addRoute(props: DevTunnel<Hostnames>, hostname: Hostnames[number]) {
-    if(!hostnames.includes(hostname)) {
-      throw new Error(`Hostname ${hostname} does not exist on this dev tunnel. You must declare all hostnames when creating the dev tunnel.`);
+    if (!hostnames.includes(hostname)) {
+      throw new Error(
+        `Hostname ${hostname} does not exist on this dev tunnel. You must declare all hostnames when creating the dev tunnel.`,
+      );
     }
     if (usedHostnames.has(hostname)) {
-      throw new Error(`Hostname ${hostname} is already assigned to another worker.`);
+      throw new Error(
+        `Hostname ${hostname} is already assigned to another worker.`,
+      );
     }
     usedHostnames.add(hostname);
     return {
