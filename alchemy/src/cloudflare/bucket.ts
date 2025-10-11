@@ -1,4 +1,3 @@
-import type { R2PutOptions } from "@cloudflare/workers-types";
 import type { R2PutOptions as ExperimentalR2PutOptions } from "@cloudflare/workers-types/experimental/index.ts";
 import * as mf from "miniflare";
 import { isDeepStrictEqual } from "node:util";

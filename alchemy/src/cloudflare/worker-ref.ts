@@ -1,4 +1,3 @@
-import type { Rpc } from "@cloudflare/workers-types";
 import type { WorkerBindingService } from "./bindings.ts";
 
 /**
