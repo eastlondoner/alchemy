@@ -1352,3 +1352,10 @@ export type DeploymentConfiguration = {
     kind: "health" | "ready";
   }>;
 };
+
+
+const singletonContainerId = "cf-singleton-container";
+export function getContainer<T extends Rpc.DurableObjectBranded>(binding: DurableObjectNamespace<T>, name: string = singletonContainerId) {
+    const objectId = binding.idFromName(name ?? singletonContainerId);
+    return binding.get(objectId);
+}

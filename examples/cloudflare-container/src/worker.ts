@@ -1,10 +1,13 @@
 import {
   Container,
-  getContainer,
   getRandom,
   switchPort,
 } from "@cloudflare/containers";
+import { getContainer } from "alchemy/cloudflare";
 import { Hono } from "hono";
+
+
+type Env = typeof import("../alchemy.run.ts").worker.Env;
 
 export class MyContainer extends Container {
   // Port the container listens on (default: 8080)
@@ -32,7 +35,7 @@ export class MyContainer extends Container {
 
 // Create Hono app with proper typing for Cloudflare Workers
 const app = new Hono<{
-  Bindings: { MY_CONTAINER: DurableObjectNamespace<MyContainer> };
+  Bindings: Env
 }>();
 
 // Home route with available endpoints

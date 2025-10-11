@@ -1,4 +1,5 @@
-import type { R2PutOptions } from "@cloudflare/workers-types/experimental/index.ts";
+import type { R2PutOptions } from "@cloudflare/workers-types";
+import type { R2PutOptions as ExperimentalR2PutOptions } from "@cloudflare/workers-types/experimental/index.ts";
 import * as mf from "miniflare";
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "../context.ts";
@@ -512,7 +513,7 @@ export async function R2Bucket(
       options?: Pick<R2PutOptions, "httpMetadata">,
     ): Promise<PutR2ObjectResponse> => {
       if (isLocal) {
-        return await (await localBucket()).put(
+        const result = await (await localBucket()).put(
           key,
           typeof value === "string"
             ? value
@@ -525,8 +526,12 @@ export async function R2Bucket(
                 : value instanceof ReadableStream
                   ? new Uint8Array(await streamToBuffer(value))
                   : value,
-          options,
+          options as ExperimentalR2PutOptions,
         );
+        if (!result) {
+          throw new Error("Failed to put object");
+        }
+        return result;
       }
       const response = await putObject(api, {
         bucketName: bucket.name,

@@ -30,6 +30,8 @@ export const worker = await Worker("test-worker", {
   },
 });
 
+type Env = typeof worker.Env;
+
 console.log(worker.url);
 
 if (process.env.ALCHEMY_E2E) {
