@@ -5,6 +5,9 @@ import {
   switchPort,
 } from "@cloudflare/containers";
 import { Hono } from "hono";
+import type { worker } from "../alchemy.run.ts";
+
+type Env = typeof worker.Env;
 
 export class MyContainer extends Container {
   // Port the container listens on (default: 8080)
@@ -32,7 +35,7 @@ export class MyContainer extends Container {
 
 // Create Hono app with proper typing for Cloudflare Workers
 const app = new Hono<{
-  Bindings: { MY_CONTAINER: DurableObjectNamespace<MyContainer> };
+  Bindings: Env;
 }>();
 
 // Home route with available endpoints
@@ -47,14 +50,19 @@ app.get("/", (c) => {
 });
 
 // Route requests to a specific container using the container ID
-app.get("/container/:id", async (c) => {
-  const id = c.req.param("id");
-  const container = getContainer(c.env.MY_CONTAINER, id);
-  return await container.fetch(switchPort(c.req.raw, 8080));
-});
+// app.get("/container/:id", async (c) => {
+//   const id = c.req.param("id");
+//   const container = getContainer(c.env.MY_CONTAINER, id);
+//   return await container.fetch(switchPort(c.req.raw, 8080));
+// });
 
 // Demonstrate error handling - this route forces a panic in the container
 app.get("/error", async (c) => {
+  const containerNamespace: DurableObjectNamespace<MyContainer> = c.env.MY_CONTAINER;
+
+  console.log("containerNamespace", containerNamespace);
+
+
   const container = getContainer(c.env.MY_CONTAINER, "error-test");
   return await container.fetch(switchPort(c.req.raw, 8080));
 });
