@@ -58,20 +58,26 @@ export async function DevTunnel<const Hostnames extends string[]>(
 
   let port: null | string = null;
 
+  const usedHostnames = new Set<string>();
+  const hostnames = props.hostnames;
   const ingress: Exclude<TunnelProps["ingress"], undefined> = [
+    ...hostnames.map((hostname) => ({
+      service: port ? `http://localhost:${port}` : "LOCAL_WORKER_PLACEHOLDER",
+      hostname,
+    })),
     {
       service: "http_status:404",
     },
   ];
 
   function addRoute(props: DevTunnel<Hostnames>, hostname: Hostnames[number]) {
-    if (ingress.some((rule) => rule.hostname === hostname)) {
-      throw new Error(`Route ${hostname} already exists`);
+    if(!hostnames.includes(hostname)) {
+      throw new Error(`Hostname ${hostname} does not exist on this dev tunnel. You must declare all hostnames when creating the dev tunnel.`);
     }
-    ingress.unshift({
-      service: port ? `http://localhost:${port}` : "LOCAL_WORKER_PLACEHOLDER",
-      hostname: hostname,
-    });
+    if (usedHostnames.has(hostname)) {
+      throw new Error(`Hostname ${hostname} is already assigned to another worker.`);
+    }
+    usedHostnames.add(hostname);
     return {
       tunnel: props,
       hostname,
