@@ -7,7 +7,7 @@ import { Tunnel, type TunnelProps } from "./tunnel.ts";
  * DevTunnel extends Tunnel with development-specific defaults and conveniences
  */
 export interface DevTunnelProps<Hostnames extends string[]>
-  extends Omit<TunnelProps, "service" | "ingress" | "configSrc"> {
+  extends Omit<TunnelProps, "service" | "ingress" | "configSrc" | "adopt"> {
   name: string;
   /**
    * Hostname to use for the tunnel
@@ -90,6 +90,7 @@ export async function DevTunnel<const Hostnames extends string[]>(
   const devTunnelProps: DevTunnel<Hostnames> = {
     ...props,
     id,
+    adopt: true, // adopt is always true for dev tunnels for best experience
     hostnames: props.hostnames as Hostnames,
     setPort(newPort: string) {
       port = newPort;

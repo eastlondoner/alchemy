@@ -141,6 +141,10 @@ console.log(worker.url); // http://localhost:3000
 
 Route requests from the public internet to your locally running Worker via a Cloudflare Tunnel.
 
+### Quick Tunnels
+
+Enable quick tunnel mode to automatically proxy your worker's public URL through a tunnel:
+
 ```ts
 const worker = await Worker("my-worker", {
   entrypoint: "worker.ts",
@@ -157,6 +161,47 @@ You must download and install `cloudflared` - see the [Cloudflare Tunnels docume
 :::note
 **How it works**: a temporary ["Quick Tunnel"](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) is created and bound to the remote Worker (e.g. `my-worker`) which proxies requests to your locally running Worker via the Tunnel.
 :::
+
+### Named Tunnels
+
+To use custom hostnames to route public traffic to your local development environment with tunnels use the [`DevTunnel`](/providers/cloudflare/dev-tunnel/) resource:
+
+```ts
+import { DevTunnel, Worker } from "alchemy/cloudflare";
+
+// Create a named tunnel with specific hostnames that you want to use. You can only use hostnames on Cloudflare managed domains in your account.
+const devTunnel = await DevTunnel("dev-tunnel", {
+  name: "my-dev-tunnel",
+  hostnames: ["api-dev.example.com", "web-dev.example.com"] as const,
+});
+
+// API worker on api-dev.example.com
+const apiWorker = await Worker("api", {
+  entrypoint: "./src/api-worker.ts",
+  dev: {
+    tunnel: devTunnel.addRoute("api-dev.example.com"),
+  },
+});
+
+// Web worker on web-dev.example.com
+const webWorker = await Worker("web", {
+  entrypoint: "./src/web-worker.ts",
+  bindings: {
+    API: apiWorker, // Service binding works locally
+  },
+  dev: {
+    tunnel: devTunnel.addRoute("web-dev.example.com"),
+  },
+});
+```
+
+Named tunnels provide:
+- **Custom hostnames**: Use your own domains for development
+- **Deployed Workers unaffected**: Deployed workers are not modified and continue to server traffic as normal
+- **Automatic DNS**: DNS records & SSL certificates are created for each hostname automatically
+- **Stable URLs**: Persist across development sessions
+
+See the [DevTunnel documentation](/providers/cloudflare/dev-tunnel/) for more details.
 
 
 

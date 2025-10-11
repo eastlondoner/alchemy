@@ -5,6 +5,10 @@ description: Connect private services securely to the internet without exposing 
 
 A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) provides a secure connection between your origin server and Cloudflare's global network without exposing your server's IP address.
 
+:::tip[Local Development]
+For routing public traffic to your local development environment, use [`DevTunnel`](/providers/cloudflare/dev-tunnel/) instead. DevTunnel integrates with [`alchemy dev`](/concepts/dev/) and automatically manages `cloudflared` for you. See the [Local Development guide](/concepts/dev/#tunnel) for more information.
+:::
+
 ## Minimal Example
 
 Create a basic tunnel and run it with the returned token:
@@ -349,3 +353,9 @@ Tunnel names cannot be changed after creation. Attempting to change the name wil
 :::tip
 Use the `adopt: true` option when migrating existing tunnels to Alchemy management.
 :::
+
+## See Also
+
+- [DevTunnel](/providers/cloudflare/dev-tunnel/) - Route public traffic to local development workers
+- [Local Development Guide](/concepts/dev/) - Learn about Alchemy's development mode
+- [Cloudflare Tunnel Guide](/guides/cloudflare-tunnel/) - Getting started with production tunnels
