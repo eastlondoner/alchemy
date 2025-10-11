@@ -7,6 +7,10 @@ const app = await alchemy("cloudflare-dev-tunnel-named");
 const TEST_DOMAIN = process.env.TEST_DOMAIN || process.env.ALCHEMY_TEST_DOMAIN;
 
 if (!TEST_DOMAIN) {
+  if(process.env.ALCHEMY_E2E === "1") {
+    console.warn("Skipping cloudflare-dev-tunnel-named E2E test because TEST_DOMAIN or ALCHEMY_TEST_DOMAIN is not set");
+    process.exit(0);
+  }
   throw new Error("TEST_DOMAIN or ALCHEMY_TEST_DOMAIN must be set");
 }
 
@@ -32,15 +36,28 @@ export const apiWorker = await Worker("api", {
   dev: {
     tunnel: devTunnel.addRoute(`api-dev.${TEST_DOMAIN}`),
   },
+  domains: [
+    {
+      domainName: `api.${TEST_DOMAIN}`,
+      adopt: true,
+    },
+  ],
 });
 
 // Web worker on web-dev.example.com
 export const webWorker = await Worker("web", {
   entrypoint: "./src/web-worker.ts",
+
   bindings: {
     API: apiWorker,
     CACHE: cache,
   },
+  domains: [
+    {
+      domainName: `web.${TEST_DOMAIN}`,
+      adopt: true,
+    },
+  ],
   dev: {
     tunnel: devTunnel.addRoute(`web-dev.${TEST_DOMAIN}`),
   },

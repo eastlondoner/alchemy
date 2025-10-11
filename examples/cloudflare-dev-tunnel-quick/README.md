@@ -5,14 +5,14 @@ This example demonstrates using quick dev tunnels (`tunnel: true`) with Cloudfla
 ## Features
 
 - Automatic tunnel creation using `cloudflared`
-- Public workers.dev URL for local development
-- No custom domain configuration needed
-- Perfect for quick testing and sharing work-in-progress
+- All traffic for the `Worker`'s public workers.dev URL is routed to the local worker via a Cloudflare Tunnel
+- Traffic for multiple workers can be routed to using a singe tunnel
+- No custom domain configuration needed. Works with your predictable, stable workers.dev URLs
+- Perfect for development and quick testing when you need a publicly accessible secure (https) URL
 
 ## Prerequisites
 
 1. [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) must be installed
-2. Cloudflare account credentials configured
 
 ## Running
 
@@ -40,16 +40,15 @@ bun test:examples -t dev-tunnel-quick
 When `dev: { tunnel: true }` is set, Alchemy:
 1. Starts a local miniflare instance for your worker
 2. Creates a temporary Cloudflare Tunnel using `cloudflared`
-3. Deploys a lightweight proxy worker to workers.dev
-4. Routes all requests through the tunnel to your local worker
+3. Replaces the deployed worker on Cloudflare with a lightweight proxy worker that routes all requests through the tunnel to your local worker
 
-This gives you a real HTTPS URL pointing to your local development environment.
+This redirects your (public, https) `workers.dev` URL to your local development environment.
 
 ## When to Use
 
 - Quick testing without domain setup
 - Sharing work-in-progress with team members
-- Testing webhooks from external services
+- Testing that requires a public https URL like webhooks from external services, OAuth flows, etc.
 - Mobile device testing
 
 For production deployments or custom domains, use regular deployment:
