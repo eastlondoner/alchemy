@@ -4,7 +4,7 @@ type GetBackendUrlProps = {
 }
 
 /**
- * Use this function to automatically get the correct backend URL for your frontend for both local and deployed environments
+ * Use this function in your frontend code to automatically get the correct URL for your backend API in both local and deployed environments
  * @param param0 { path: string }
  * @returns 
  */
