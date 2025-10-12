@@ -151,14 +151,14 @@ await BunSPA("my-app", {
 
 ### bunfig.toml Requirement
 
-BunSPA requires a `bunfig.toml` file in your project root to expose `PUBLIC_*` environment variables during development:
+BunSPA requires a `bunfig.toml` file in your project root to expose `BUN_PUBLIC_*` environment variables during development:
 
 ```toml
 [serve.static]
-env='PUBLIC_*'
+env='BUN_PUBLIC_*'
 ```
 
-This allows Bun to inline environment variables prefixed with `PUBLIC_` into your frontend code.
+This allows Bun to inline environment variables prefixed with `BUN_PUBLIC_` into your frontend code.
 
 ### Accessing the Backend
 

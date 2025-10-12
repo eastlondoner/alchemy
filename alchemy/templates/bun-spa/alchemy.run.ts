@@ -5,9 +5,9 @@ import { BunSPA } from "alchemy/cloudflare";
 
 const app = await alchemy("{projectName}");
 
-export const bunsite = await BunSPA("website", {
-  entrypoint: "src/server.ts",
-  frontend: "index.html",
+export const bunsite = await BunSPA("bun-spa-site", {
+  entrypoint: "src/worker.ts",
+  frontend: ["src/index.html"],
 });
 
 console.log({

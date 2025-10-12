@@ -1,4 +1,11 @@
 {
+  "include": [
+    "types/**/*.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "alchemy.run.ts",
+    "bun-env.d.ts"
+  ],
   "compilerOptions": {
     "target": "ESNext",
     "lib": [

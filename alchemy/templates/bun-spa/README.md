@@ -68,21 +68,22 @@ bun run destroy
 ## Project Structure
 
 ```
-├── index.html          # Main HTML entry point
-├── src/
-│   ├── App.tsx         # Main React component
-│   ├── main.tsx        # React entry point with HMR
-│   ├── server.ts       # Cloudflare Worker backend
-│   ├── env.d.ts        # Type definitions for bindings
-│   └── assets/         # Static assets (images, etc.)
 ├── alchemy.run.ts      # Infrastructure definition
-├── bunfig.toml         # Bun configuration for PUBLIC_* env vars
-└── package.json        # Dependencies and scripts
+├── bunfig.toml         # Bun configuration for BUN_PUBLIC_* env vars
+├── package.json        # Dependencies and scripts
+├── src/
+│   ├── index.html      # Main HTML entry point
+│   ├── App.tsx         # Main React component
+│   ├── frontend.tsx    # React entry point with HMR
+│   ├── worker.ts       # Cloudflare Worker backend
+│   └── assets/         # Static assets (images, etc.)
+└── types/
+    └── worker.d.ts     # Worker's Env type definition from bindings
 ```
 
 ## Environment Variables
 
-The `bunfig.toml` file is required for Bun to expose `PUBLIC_*` environment variables to your frontend during development. This allows you to pass configuration from your backend to your frontend safely.
+The `bunfig.toml` file is required for Bun to expose `BUN_PUBLIC_*` environment variables to your frontend during development. This allows alchemy to pass configuration to your frontend during development.
 
 ## Learn More
 

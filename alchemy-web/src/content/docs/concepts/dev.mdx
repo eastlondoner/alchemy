@@ -374,11 +374,11 @@ Alchemy integrates with popular web frameworks, so you can use them with Alchemy
 
     ```toml title="bunfig.toml"
     [serve.static]
-    env='PUBLIC_*'
+    env='BUN_PUBLIC_*'
     ```
 
     :::tip
-    The `bunfig.toml` configuration allows Bun to expose `PUBLIC_*` environment variables to your frontend during development. This enables your client-side code to access the backend URL via `process.env.PUBLIC_BACKEND_URL`.
+    The `bunfig.toml` configuration allows Bun to expose `BUN_PUBLIC_*` environment variables to your frontend during development. This enables your client-side code to access the backend URL via `process.env.PUBLIC_BACKEND_URL`.
     :::
 
     BunSPA provides automatic integration:

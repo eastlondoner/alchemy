@@ -11,7 +11,7 @@ import {
   text,
 } from "@clack/prompts";
 import * as fs from "fs-extra";
-import { resolve } from "node:path";
+import path, { resolve } from "node:path";
 import pc from "picocolors";
 import z from "zod";
 import { detectPackageManager } from "../../src/util/detect-package-manager.ts";
@@ -213,6 +213,30 @@ async function handleDirectoryOverwrite(
     return;
   }
 
+  // Check for existing Bun project if template is bun-spa
+  if (context.template === "bun-spa") {
+    const isBunProject = await detectExistingBunProject(context.path);
+
+    if (isBunProject) {
+      const shouldMerge = await confirm({
+        message: "Existing Bun project detected. Add Alchemy to this project?",
+        initialValue: true,
+      });
+
+      if (isCancel(shouldMerge)) {
+        cancel(pc.red("Operation cancelled."));
+        throw new ExitSignal(0);
+      }
+
+      if (shouldMerge) {
+        context.mergeMode = true;
+        return;
+      }
+
+      // If user declined merge, fall through to normal overwrite logic
+    }
+  }
+
   const shouldOverwrite = await getShouldOverwrite(context);
 
   if (!shouldOverwrite) {
@@ -221,6 +245,14 @@ async function handleDirectoryOverwrite(
   }
 
   await removeExistingDirectory(context);
+}
+
+async function detectExistingBunProject(projectPath: string): Promise<boolean> {
+  const bunfigExists = fs.existsSync(path.join(projectPath, "bunfig.toml"));
+  const bunLockExists = fs.existsSync(path.join(projectPath, "bun.lock"));
+  const bunEnvExists = fs.existsSync(path.join(projectPath, "bun-env.d.ts"));
+
+  return bunfigExists || bunLockExists || bunEnvExists;
 }
 
 async function getShouldOverwrite(context: ProjectContext): Promise<boolean> {

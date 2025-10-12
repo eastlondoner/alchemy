@@ -55,6 +55,7 @@ export interface ProjectContext {
   packageManager: PackageManager;
   isTest: boolean;
   options: CreateInput;
+  mergeMode?: boolean;
 }
 
 export interface WebsiteOptions {
