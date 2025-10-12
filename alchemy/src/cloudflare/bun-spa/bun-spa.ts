@@ -70,7 +70,8 @@ export async function BunSPA<B extends Bindings>(
   }
 
   const scope = Scope.current;
-  const nodeEnv = props.bindings?.NODE_ENV ?? scope.local ? "development" : "production";  
+  const nodeEnv =
+    (props.bindings?.NODE_ENV ?? scope.local) ? "development" : "production";
   console.log("creating website", outDir);
   const website = await Website(id, {
     spa: true,
@@ -85,7 +86,7 @@ export async function BunSPA<B extends Bindings>(
     },
     build: spreadBuildProps(
       props,
-      `bun build '${frontendPaths.join("' '")}' --target=browser --minify --define:process.env.NODE_ENV='\"${nodeEnv}\"' --env='BUN_PUBLIC_* --outdir ${outDir}`,
+      `bun build '${frontendPaths.join("' '")}' --target=browser --minify --define:process.env.NODE_ENV='"${nodeEnv}"' --env='BUN_PUBLIC_* --outdir ${outDir}`,
     ),
   });
 
@@ -127,7 +128,7 @@ export async function BunSPA<B extends Bindings>(
         ...process.env,
         NODE_ENV: "development",
         ALCHEMY_ROOT: Scope.current.rootDir,
-        PUBLIC_BACKEND_URL: apiUrl,
+        BUN_PUBLIC_BACKEND_URL: apiUrl,
       },
     });
   }
@@ -151,7 +152,8 @@ async function validateBunfigToml(cwd: string): Promise<void> {
   const config = Bun.TOML.parse(content) as Record<string, any>;
 
   const hasServeStatic = config.serve?.static;
-  const hasEnvConfig = hasServeStatic && config.serve.static.env === "BUN_PUBLIC_*";
+  const hasEnvConfig =
+    hasServeStatic && config.serve.static.env === "BUN_PUBLIC_*";
 
   if (!hasServeStatic || !hasEnvConfig) {
     throw new Error(

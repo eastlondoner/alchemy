@@ -97,7 +97,7 @@ function App() {
           Edit <code>src/App.tsx</code> and save to test HMR (frontend changes are applied in real time)
         </p>
         <p>
-          Edit <code>src/server.tsx</code> and save to test alchemy dev (backend changes are applied in real time)
+          Edit <code>src/worker.tsx</code> and save to test alchemy dev (backend changes are applied in real time)
         </p>
         <p style={{ fontSize: "0.9em", opacity: 0.7 }}>
           Counter persisted in Cloudflare KV

@@ -75,7 +75,7 @@ export const kv = await KVNamespace("kv", {
 });
 
 export const bunsite = await BunSPA("website", {
-  entrypoint: "src/server.ts", // Your backend entrypoint
+  entrypoint: "src/worker.ts", // Your backend entrypoint
   frontend: "src/index.html", // Your frontend HTML file(s)
   bindings: {
     KV: kv,
@@ -266,8 +266,8 @@ export const kv = await KVNamespace("kv", {
 });
 
 export const bunsite = await BunSPA("website", {
-  entrypoint: "src/server.ts",
-  frontend: "index.html",
+  entrypoint: "src/worker.ts",
+  frontend: "src/index.html",
   bindings: {
     KV: kv,
     API_KEY: alchemy.secret(process.env.API_KEY),
@@ -344,8 +344,8 @@ You can serve multiple HTML pages by passing an array to the `frontend` property
 
 ```typescript
 const bunsite = await BunSPA("website", {
-  frontend: ["index.html", "about.html"],
-  entrypoint: "src/server.ts",
+  frontend: ["src/index.html", "src/about.html"],
+  entrypoint: "src/worker.ts",
 });
 ```
 
@@ -364,7 +364,7 @@ fetch(`${apiBaseUrl.protocol}${apiBaseUrl.host}/api/endpoint`)
   .then(data => console.log(data));
 ```
 
-This utility automatically uses `PUBLIC_BACKEND_URL` in development (injected by Alchemy) and falls back to the current origin in production, allowing your frontend to communicate seamlessly with your backend in both environments.
+This utility automatically uses `BUN_PUBLIC_BACKEND_URL` in development (injected by Alchemy) and falls back to the current origin in production, allowing your frontend to communicate seamlessly with your backend in both environments.
 
 ### Hot Module Replacement
 

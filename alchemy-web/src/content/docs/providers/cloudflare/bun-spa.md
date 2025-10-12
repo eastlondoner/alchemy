@@ -13,7 +13,7 @@ Deploy a basic Bun SPA with a single HTML entrypoint:
 import { BunSPA } from "alchemy/cloudflare";
 
 const app = await BunSPA("my-app", {
-  frontend: "index.html",
+  frontend: "src/index.html",
 });
 ```
 
@@ -25,7 +25,7 @@ Serve multiple pages by providing an array of HTML entrypoints:
 import { BunSPA } from "alchemy/cloudflare";
 
 const app = await BunSPA("my-app", {
-  frontend: ["index.html", "about.html", "contact.html"],
+  frontend: ["src/index.html", "src/about.html", "src/contact.html"],
 });
 ```
 
@@ -37,8 +37,8 @@ Add a Cloudflare Worker backend to handle API requests:
 import { BunSPA } from "alchemy/cloudflare";
 
 const app = await BunSPA("my-app", {
-  frontend: "index.html",
-  entrypoint: "./src/server.ts",
+  frontend: "src/index.html",
+  entrypoint: "./src/worker.ts",
 });
 ```
 
@@ -104,8 +104,8 @@ const db = await D1Database("db", {
 });
 
 const app = await BunSPA("my-app", {
-  frontend: "index.html",
-  entrypoint: "./src/server.ts",
+  frontend: "src/index.html",
+  entrypoint: "./src/worker.ts",
   bindings: {
     KV: kv,
     DB: db,
@@ -122,9 +122,9 @@ Customize the build output directory:
 import { BunSPA } from "alchemy/cloudflare";
 
 const app = await BunSPA("my-app", {
-  frontend: "index.html",
+  frontend: "src/index.html",
   outDir: "build/client",
-  build: "bun run test && bun build index.html --outdir build/client",
+  build: "bun run test && bun build src/index.html --outdir build/client",
 });
 ```
 
@@ -134,7 +134,7 @@ The transform hook allows you to customize the wrangler.json configuration. For 
 
 ```ts
 await BunSPA("my-app", {
-  frontend: "index.html",
+  frontend: "src/index.html",
   wrangler: {
     transform: (spec) => ({
       ...spec,
@@ -171,5 +171,5 @@ const apiBaseUrl = getBackendUrl();
 fetch(`${apiBaseUrl.protocol}${apiBaseUrl.host}/api/endpoint`);
 ```
 
-Under the hood, this uses the `PUBLIC_BACKEND_URL` environment variable in development, which is automatically set by Alchemy, and falls back to the current origin in production.
+Under the hood, this uses the `BUN_PUBLIC_BACKEND_URL` environment variable in development, which is automatically set by Alchemy, and falls back to the current origin in production.
 

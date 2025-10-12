@@ -18,9 +18,9 @@ export function getBackendUrl({ routePath }: GetBackendUrlProps = {}): URL {
   // Start with the current host
   let backendUrl = `${window.location.protocol}//${window.location.host}${pathToUse}`;
   try {
-    // Bun will only inline this if we use exactly `process.env.PUBLIC_BACKEND_URL` it we use other forms including process?.env for example bun will not inline it
-    // we can't check typeof process either because process may not be available but Bun may already have inlined process.env.PUBLIC_BACKEND_URL with the correct value
-    backendUrl = process.env.PUBLIC_BACKEND_URL ?? backendUrl;
+    // Bun will only inline this if we use exactly `process.env.BUN_PUBLIC_BACKEND_URL` it we use other forms including process?.env for example bun will not inline it
+    // we can't check typeof process either because process may not be available but Bun may already have inlined process.env.BUN_PUBLIC_BACKEND_URL with the correct value
+    backendUrl = process.env.BUN_PUBLIC_BACKEND_URL ?? backendUrl;
   } catch {
     // Bun may not have had anything to inline and process.env may not exist to above can throw an error
     // do nothing

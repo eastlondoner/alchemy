@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { CloudflareEnv } from "../types/env";
+import type { CloudflareEnv } from "../types/env.ts";
 
 export const api = new Hono<{ Bindings: CloudflareEnv }>();
 
