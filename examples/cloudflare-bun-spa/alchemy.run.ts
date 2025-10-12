@@ -1,4 +1,4 @@
-/// <reference types="node" />
+/// <reference types="@types/bun" />
 
 import alchemy from "alchemy";
 import { BunSPA, KVNamespace } from "alchemy/cloudflare";

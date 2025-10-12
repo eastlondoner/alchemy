@@ -1,26 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 
+import { getBackendUrl } from "alchemy/cloudflare/bun-spa";
 import bunLogo from "./assets/logo.svg";
 import alchemyLogo from "./assets/potion.png";
 import reactLogo from "./assets/react.svg";
 
-// This is ugly but it's necessary to support both local and prod environments
-let apiBaseUrl: string = window.location.protocol + '//' + window.location.host;
-try {
-  // Bun will only inline this if we use exactly `process.env.PUBLIC_BACKEND_URL` it we use other forms including process?.env for example bun will not inline it
-  // we can't check typeof process either because process may not be available but Bun may already have inlined process.env.PUBLIC_BACKEND_URL with the correct value
-  apiBaseUrl = process.env.PUBLIC_BACKEND_URL ?? apiBaseUrl;
-} catch {
-  // Bun may not have had anything to inline and process.env may not exist to above can throw an error
-  // do nothing
-}
-console.log("Using apiBaseUrl", apiBaseUrl);
+const apiBaseUrl = getBackendUrl();
 
 function backendUrl(path: string) {
   if(path.startsWith('/')) {
-    return `${apiBaseUrl.replace(/\/$/, '')}${path}`;
+    return `${apiBaseUrl.protocol}${apiBaseUrl.host}${path}`;
   }
+  // Handle relative paths, tbh this is not really necessary
   const currentPathWithoutQuery = window.location.pathname.split('?')[0];
   const pathDirs = currentPathWithoutQuery.split('/');
   pathDirs.pop();  // we never want the 'filename'
@@ -29,7 +21,7 @@ function backendUrl(path: string) {
     pathDirs.shift();
   }
   const newPath = pathDirs.join('/');
-  return `${apiBaseUrl}${newPath}${path}`;
+  return `${apiBaseUrl.protocol}${apiBaseUrl.host}${newPath}${path}`;
 }
 
 function fetchBackend(path: string, init?: Parameters<typeof fetch>[1]) {
