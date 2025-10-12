@@ -74,6 +74,7 @@
     },
     "./cloudflare/bun-spa": {
       "bun": "./src/cloudflare/bun-spa/index.ts",
+      "browser": "./src/cloudflare/bun-spa/index.ts",
       "import": "./lib/cloudflare/bun-spa/index.js"
     },
     "./cloudflare/nuxt": {
