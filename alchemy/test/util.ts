@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -137,7 +137,7 @@ export async function runCommand(
   console.log(`Running: ${command} in ${cwd}`);
 
   try {
-    const result = execSync(command, {
+    const result = await exec(command, {
       cwd,
       env: {
         ...process.env,

@@ -111,6 +111,18 @@
         "noRestrictedImports": {
           "level": "error",
           "options": {
+            "patterns": [
+              {
+                "group": [
+                  "node:fs",
+                  "fs",
+                  "node:child_process",
+                  "child_process"
+                ],
+                "importNamePattern": ".*Sync",
+                "message": "Prefer async APIs (fs.promises.*, exec, spawn) over sync imports."
+              }
+            ],
             "paths": {
               "picocolors": {
                 "allowImportNames": ["default"],

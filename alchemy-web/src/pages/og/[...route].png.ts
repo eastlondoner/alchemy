@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { getCollection, type CollectionEntry } from "astro:content";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import {
   access,
   constants,
@@ -52,7 +52,7 @@ async function getBrowser(): Promise<Browser> {
   return sharedBrowser;
 }
 
-function getAsset(filename: string): string {
+async function getAsset(filename: string): string {
   // Return cached version if available
   if (assetCache.has(filename)) {
     return assetCache.get(filename)!;
@@ -60,7 +60,7 @@ function getAsset(filename: string): string {
 
   try {
     const publicDir = join(process.cwd(), "public");
-    const fileData = readFileSync(join(publicDir, filename));
+    const fileData = await readFile(join(publicDir, filename));
 
     // Determine MIME type based on file extension
     const ext = filename.split(".").pop()?.toLowerCase();
@@ -440,7 +440,7 @@ export const GET: APIRoute = async ({ props, params }) => {
   <div class="og-container">
     <div class="content">
       <div class="logo">
-        <img src="${getAsset("alchemy-logo-dark.svg")}" alt="Alchemy" class="logo-image" />
+        <img src="${await getAsset("alchemy-logo-dark.svg")}" alt="Alchemy" class="logo-image" />
       </div>
       ${breadcrumbText ? `<div class="breadcrumb">${breadcrumbText}</div>` : ""}
       <h1 class="title">${data.title}</h1>
@@ -449,7 +449,7 @@ export const GET: APIRoute = async ({ props, params }) => {
 
     <div class="character-container">
       <div class="character-circle">
-        <img src="${getAsset("alchemist.webp")}" alt="Alchemist" class="character-image" />
+        <img src="${await getAsset("alchemist.webp")}" alt="Alchemist" class="character-image" />
       </div>
     </div>
   </div>
