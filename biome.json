@@ -127,6 +127,12 @@
               "picocolors": {
                 "allowImportNames": ["default"],
                 "message": "picocolors is a CJS module, import default module as 'pc'"
+              },
+              "path": {
+                "message": "Use 'pathe' instead of 'path' for cross-platform path operations"
+              },
+              "node:path": {
+                "message": "Use 'pathe' instead of 'node:path' for cross-platform path operations"
               }
             }
           }
@@ -134,6 +140,18 @@
       }
     }
   },
+  "overrides": [
+    {
+      "includes": ["examples/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": "off"
+          }
+        }
+      }
+    }
+  ],
   "formatter": {
     "enabled": true,
     "formatWithErrors": false,

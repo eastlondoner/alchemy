@@ -6,7 +6,7 @@
  */
 
 import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve } from "pathe";
 
 const compatibilityDate = await fetchWorkersCompatibilityDate();
 console.log(`Fetched Workers compatibility date: ${compatibilityDate}`);

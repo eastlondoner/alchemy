@@ -59,8 +59,12 @@ bun alchemy init --framework bun-spa
 The `alchemy init` command will:
 - Create an `alchemy.run.ts` file with BunSPA configuration
 - Validate or create `bunfig.toml` with required `env='BUN_PUBLIC_*'` configuration
-- Add Alchemy scripts to your `package.json` (`deploy`, `destroy`, `dev`)
+- Add Alchemy scripts to your `package.json` (`deploy`, `destroy`, `alchemy:dev`)
 - Install Alchemy as a dev dependency
+
+:::note
+The init command adds `alchemy:dev` (not `dev`) to preserve your existing dev script. You can rename it to `dev` if you prefer, or keep both.
+:::
 
 After initialization, update the paths in `alchemy.run.ts` to match your project structure:
 

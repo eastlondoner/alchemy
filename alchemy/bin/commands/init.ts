@@ -10,7 +10,7 @@ import {
 } from "@clack/prompts";
 import * as fs from "fs-extra";
 import { parse as parseJsonc } from "jsonc-parse";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "pathe";
 import pc from "picocolors";
 import {
   IndentationText,

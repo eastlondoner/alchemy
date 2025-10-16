@@ -9,6 +9,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+// biome-ignore lint/style/noRestrictedImports: node:path in alchemy-web is OK
 import { dirname, join } from "node:path";
 import { chromium, type Browser } from "playwright";
 
@@ -51,7 +52,7 @@ async function getBrowser(): Promise<Browser> {
   return sharedBrowser;
 }
 
-async function getAsset(filename: string): string {
+async function getAsset(filename: string): Promise<string> {
   // Return cached version if available
   if (assetCache.has(filename)) {
     return assetCache.get(filename)!;
@@ -224,7 +225,9 @@ export async function getStaticPaths() {
 }
 
 export const GET: APIRoute = async ({ props, params }) => {
-  const { entry } = props as { entry: CollectionEntry<"docs"> };
+  const { entry } = props as {
+    entry: CollectionEntry<"docs"> & { digest: string };
+  };
   const { data, digest } = entry;
   const route = params.route || "index";
 
@@ -246,7 +249,7 @@ export const GET: APIRoute = async ({ props, params }) => {
       const cachedImage = await readFile(cacheFile);
       console.log(" (using cache)");
 
-      return new Response(cachedImage, {
+      return new Response(Buffer.from(cachedImage), {
         headers: {
           "Content-Type": "image/png",
           "Cache-Control": "public, max-age=3600",
@@ -502,7 +505,7 @@ export const GET: APIRoute = async ({ props, params }) => {
   }
 
   // Return the screenshot as the response
-  return new Response(screenshot, {
+  return new Response(Buffer.from(screenshot), {
     headers: {
       "Content-Type": "image/png",
       "Cache-Control": "public, max-age=3600",

@@ -11,10 +11,11 @@ import {
   text,
 } from "@clack/prompts";
 import * as fs from "fs-extra";
-import { resolve } from "node:path";
+import { resolve } from "pathe";
 import pc from "picocolors";
 import z from "zod";
 import { detectPackageManager } from "../../src/util/detect-package-manager.ts";
+import { exists } from "../../src/util/exists.ts";
 import { throwWithContext } from "../errors.ts";
 import { initializeGitRepo, isGitInstalled } from "../services/git.ts";
 import { addGitHubWorkflowToAlchemy } from "../services/github-workflow.ts";
@@ -35,7 +36,6 @@ import {
   TEMPLATE_DEFINITIONS,
   TemplateSchema,
 } from "../types.ts";
-import { exists } from "../../src/util/exists.ts";
 
 const isTest = process.env.NODE_ENV === "test";
 

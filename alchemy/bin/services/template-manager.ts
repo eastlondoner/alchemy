@@ -2,8 +2,7 @@ import { log, spinner } from "@clack/prompts";
 import { execa } from "execa";
 import * as fs from "fs-extra";
 import { globby } from "globby";
-import * as path from "node:path";
-import { join } from "node:path";
+import path, { join } from "pathe";
 
 import { exists } from "../../src/util/exists.ts";
 import { PKG_ROOT } from "../constants.ts";
