@@ -1,6 +1,5 @@
 import type { APIRoute } from "astro";
 import { getCollection, type CollectionEntry } from "astro:content";
-import { readFile } from "node:fs/promises";
 import {
   access,
   constants,

@@ -1,5 +1,6 @@
 import * as fs from "fs-extra";
-import { join } from "node:path";
+import { join } from "pathe";
+import { exists } from "../../src/util/exists.ts";
 
 export async function ensureVibeRulesPostinstall(
   cwd: string,
@@ -7,7 +8,7 @@ export async function ensureVibeRulesPostinstall(
 ): Promise<void> {
   try {
     const packageJsonPath = join(cwd, "package.json");
-    if (!(await fs.pathExists(packageJsonPath))) return;
+    if (!(await exists(packageJsonPath))) return;
 
     const packageJson = await fs.readJson(packageJsonPath);
 

@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/suspicious/noTemplateCurlyInString: we are building a github template workflow */
 import { spinner } from "@clack/prompts";
 import fs from "fs-extra";
-import path from "node:path";
+import path from "pathe";
 import YAML from "yaml";
 import { throwWithContext } from "../errors.ts";
 import type { ProjectContext } from "../types.ts";

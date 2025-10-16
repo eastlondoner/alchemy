@@ -1,5 +1,5 @@
 import fs from "fs-extra";
-import path from "node:path";
+import path from "pathe";
 import { PKG_ROOT } from "../constants.ts";
 
 export const getPackageVersion = async () => {

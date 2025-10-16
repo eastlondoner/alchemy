@@ -1,7 +1,7 @@
 import { exec } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
+import path from "pathe";
 import type { AlchemyOptions } from "../src/alchemy.ts";
 import { CloudflareStateStore } from "../src/state/cloudflare-state-store.ts";
 import { D1StateStore } from "../src/state/d1-state-store.ts";

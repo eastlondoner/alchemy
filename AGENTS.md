@@ -777,9 +777,10 @@ for (const item of items) {
   await fs.existsSync(item);
 }
 
+import { exists } from "alchemy/utils/exists.ts";
 // ✅ DO: Promise.all
 await Promise.all(items.map(
-  async (item) => await fs.promises.pathExists(item)
+  async (item) => await exists(item)
 ));
 ```
 

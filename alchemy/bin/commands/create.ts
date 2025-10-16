@@ -11,7 +11,7 @@ import {
   text,
 } from "@clack/prompts";
 import * as fs from "fs-extra";
-import path, { resolve } from "node:path";
+import { resolve } from "node:path";
 import pc from "picocolors";
 import z from "zod";
 import { detectPackageManager } from "../../src/util/detect-package-manager.ts";
@@ -35,6 +35,7 @@ import {
   TEMPLATE_DEFINITIONS,
   TemplateSchema,
 } from "../types.ts";
+import { exists } from "../../src/util/exists.ts";
 
 const isTest = process.env.NODE_ENV === "test";
 
@@ -209,32 +210,8 @@ async function getInstallPreference(
 async function handleDirectoryOverwrite(
   context: ProjectContext,
 ): Promise<void> {
-  if (!(await fs.pathExists(context.path))) {
+  if (!(await exists(context.path))) {
     return;
-  }
-
-  // Check for existing Bun project if template is bun-spa
-  if (context.template === "bun-spa") {
-    const isBunProject = await detectExistingBunProject(context.path);
-
-    if (isBunProject) {
-      const shouldMerge = await confirm({
-        message: "Existing Bun project detected. Add Alchemy to this project?",
-        initialValue: true,
-      });
-
-      if (isCancel(shouldMerge)) {
-        cancel(pc.red("Operation cancelled."));
-        throw new ExitSignal(0);
-      }
-
-      if (shouldMerge) {
-        context.mergeMode = true;
-        return;
-      }
-
-      // If user declined merge, fall through to normal overwrite logic
-    }
   }
 
   const shouldOverwrite = await getShouldOverwrite(context);
@@ -245,18 +222,6 @@ async function handleDirectoryOverwrite(
   }
 
   await removeExistingDirectory(context);
-}
-
-async function detectExistingBunProject(projectPath: string): Promise<boolean> {
-  const bunfigExists = await fs.pathExists(
-    path.join(projectPath, "bunfig.toml"),
-  );
-  const bunLockExists = await fs.pathExists(path.join(projectPath, "bun.lock"));
-  const bunEnvExists = await fs.pathExists(
-    path.join(projectPath, "bun-env.d.ts"),
-  );
-
-  return bunfigExists || bunLockExists || bunEnvExists;
 }
 
 async function getShouldOverwrite(context: ProjectContext): Promise<boolean> {

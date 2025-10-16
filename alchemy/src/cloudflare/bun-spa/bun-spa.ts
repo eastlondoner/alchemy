@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import path from "node:path";
+import path from "pathe";
 import { Scope } from "../../scope.ts";
 import { exists } from "../../util/exists.ts";
 import type { Bindings } from "../bindings.ts";
