@@ -1,6 +1,5 @@
 {
   "include": [
-    "types/**/*.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "alchemy.run.ts",

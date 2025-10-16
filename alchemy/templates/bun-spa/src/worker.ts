@@ -1,19 +1,13 @@
-function corsHeaders(request: Request): HeadersInit {
-  const origin = request.headers.get("Origin") || "";
-  // Allow any localhost origin in development, same origin in production
-  if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
-    return {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
-  }
-  return {};
-}
+import type { bunsite } from "../alchemy.run";
+
+// Infer all the env bindings from the bunsite object
+type BunsiteEnv = typeof bunsite.Env;
 
 export default {
-  fetch(request: Request): Response {
+  fetch(request: Request, env: BunsiteEnv): Response {
     const url = new URL(request.url);
+
+    console.log("SOME_VALUE from type safe bindings", env.SOME_VALUE);
 
     // Handle CORS preflight requests
     if (request.method === "OPTIONS") {
@@ -43,3 +37,15 @@ export default {
   },
 };
 
+function corsHeaders(request: Request): HeadersInit {
+  const origin = request.headers.get("Origin") || "";
+  // Allow any localhost origin
+  if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
+    return {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
+  }
+  return {};
+}

@@ -247,9 +247,7 @@ const ALCHEMY_RUN_TEMPLATES: Record<
   Exclude<TemplateType, "hono">,
   (context: InitContext) => string
 > = {
-  typescript: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  typescript: (context) => `import alchemy from "alchemy";
 import { Worker } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -283,9 +281,7 @@ console.log({
 await app.finalize();
 `,
 
-  astro: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  astro: (context) => `import alchemy from "alchemy";
 import { Astro } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -305,9 +301,7 @@ console.log({
 await app.finalize();
 `,
 
-  "react-router": (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  "react-router": (context) => `import alchemy from "alchemy";
 import { ReactRouter } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -328,9 +322,7 @@ console.log({
 await app.finalize();
 `,
 
-  sveltekit: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  sveltekit: (context) => `import alchemy from "alchemy";
 import { SvelteKit } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -350,9 +342,7 @@ console.log({
 await app.finalize();
 `,
 
-  "tanstack-start": (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  "tanstack-start": (context) => `import alchemy from "alchemy";
 import { TanStackStart } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -372,9 +362,7 @@ console.log({
 await app.finalize();
 `,
 
-  rwsdk: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  rwsdk: (context) => `import alchemy from "alchemy";
 import { D1Database, DurableObjectNamespace, Redwood } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -405,9 +393,7 @@ console.log({
 await app.finalize();
 `,
 
-  nextjs: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  nextjs: (context) => `import alchemy from "alchemy";
 import { Nextjs } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");
@@ -422,9 +408,7 @@ console.log({
 await app.finalize();
 `,
 
-  nuxt: (context) => `/// <reference types="@types/node" />
-
-import alchemy from "alchemy";
+  nuxt: (context) => `import alchemy from "alchemy";
 import { Nuxt } from "alchemy/cloudflare";
 
 const app = await alchemy("${context.projectName}");

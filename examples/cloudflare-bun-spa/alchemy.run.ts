@@ -1,4 +1,4 @@
-/// <reference types="@types/bun" />
+/// <reference types="bun-types-no-globals" />
 
 import alchemy from "alchemy";
 import { BunSPA, KVNamespace } from "alchemy/cloudflare";

@@ -62,8 +62,6 @@ touch alchemy.run.ts
 Add the following to your `alchemy.run.ts`:
 
 ```typescript
-/// <reference types="@types/node" />
-
 import alchemy from "alchemy";
 import { BunSPA, KVNamespace } from "alchemy/cloudflare";
 
@@ -141,7 +139,7 @@ Authenticate once with your Cloudflare account:
 </Tabs>
 
 :::tip
-Alchemy automatically re-uses your Wrangler OAuth tokens. See the [Cloudflare](/guides/cloudflare) guide for other options.
+Alchemy login creates Cloudflare OAuth tokens for alchemy. See the [Cloudflare](/guides/cloudflare) guide for other options.
 :::
 
 ## Deploy
@@ -253,7 +251,7 @@ ALCHEMY_PASSWORD=change-me
 ### `alchemy.run.ts`
 
 ```typescript
-/// <reference types="@types/bun" />
+/// <reference types="bun-types-no-globals" />
 
 import alchemy from "alchemy";
 import { BunSPA, KVNamespace } from "alchemy/cloudflare";
