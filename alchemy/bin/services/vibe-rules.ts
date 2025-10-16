@@ -1,4 +1,4 @@
-import * as fs from "fs-extra";
+import { readJson, writeJson } from "fs-extra";
 import { join } from "pathe";
 import { exists } from "../../src/util/exists.ts";
 
@@ -10,7 +10,7 @@ export async function ensureVibeRulesPostinstall(
     const packageJsonPath = join(cwd, "package.json");
     if (!(await exists(packageJsonPath))) return;
 
-    const packageJson = await fs.readJson(packageJsonPath);
+    const packageJson = await readJson(packageJsonPath);
 
     const postinstallCmd = `vibe-rules install ${editor}`;
 
@@ -26,6 +26,6 @@ export async function ensureVibeRulesPostinstall(
       packageJson.scripts.postinstall = postinstallCmd;
     }
 
-    await fs.writeJson(packageJsonPath, packageJson, { spaces: 2 });
+    await writeJson(packageJsonPath, packageJson, { spaces: 2 });
   } catch (_err) {}
 }

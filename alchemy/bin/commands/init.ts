@@ -8,7 +8,13 @@ import {
   outro,
   select,
 } from "@clack/prompts";
-import * as fs from "fs-extra";
+import {
+  ensureDir,
+  ensureFile,
+  readFile,
+  writeFile,
+  writeJson,
+} from "fs-extra";
 import { parse as parseJsonc } from "jsonc-parse";
 import { dirname, relative, resolve } from "pathe";
 import pc from "picocolors";
@@ -90,7 +96,7 @@ function sanitizeProjectName(name: string): string {
 
 async function readJsonc(filePath: string): Promise<any> {
   try {
-    const content = await fs.readFile(filePath, "utf-8");
+    const content = await readFile(filePath, "utf-8");
     return parseJsonc(content);
   } catch (error) {
     throw new Error(`Failed to read or parse ${filePath}: ${error}`);
@@ -98,7 +104,7 @@ async function readJsonc(filePath: string): Promise<any> {
 }
 
 async function writeJsonWithSpaces(filePath: string, data: any): Promise<void> {
-  await fs.writeJson(filePath, data, { spaces: 2 });
+  await writeJson(filePath, data, { spaces: 2 });
 }
 
 async function safelyUpdateJson(
@@ -461,7 +467,7 @@ async function createAlchemyRunFile(context: InitContext): Promise<void> {
       ? "alchemy.run.ts"
       : "alchemy.run.js";
     const outputPath = resolve(context.cwd, outputFileName);
-    await fs.writeFile(outputPath, content, "utf-8");
+    await writeFile(outputPath, content, "utf-8");
   } catch (error) {
     throwWithContext(error, "Failed to create alchemy.run file");
   }
@@ -517,11 +523,11 @@ async function updateGitignore(context: InitContext) {
   try {
     const gitignorePath = resolve(context.cwd, ".gitignore");
 
-    await fs.ensureFile(gitignorePath);
+    await ensureFile(gitignorePath);
 
     let gitignoreContent = "";
     if (await exists(gitignorePath)) {
-      gitignoreContent = await fs.readFile(gitignorePath, "utf-8");
+      gitignoreContent = await readFile(gitignorePath, "utf-8");
     }
 
     const lines = gitignoreContent.split("\n").map((line) => line.trim());
@@ -544,7 +550,7 @@ async function updateGitignore(context: InitContext) {
       }
     }
 
-    await fs.writeFile(gitignorePath, lines.join("\n"), "utf-8");
+    await writeFile(gitignorePath, lines.join("\n"), "utf-8");
   } catch (error) {
     throwWithContext(error, "Failed to update .gitignore");
   }
@@ -639,10 +645,10 @@ async function updateBunSpaProject(context: InitContext): Promise<void> {
   const bunfigPath = resolve(context.cwd, "bunfig.toml");
   if (!(await exists(bunfigPath))) {
     // Create bunfig.toml with required config
-    await fs.writeFile(bunfigPath, `[serve.static]\nenv='BUN_PUBLIC_*'\n`);
+    await writeFile(bunfigPath, `[serve.static]\nenv='BUN_PUBLIC_*'\n`);
   } else {
     // Validate bunfig.toml has required config
-    const bunfigContent = await fs.readFile(bunfigPath, "utf8");
+    const bunfigContent = await readFile(bunfigPath, "utf8");
     const hasBunPublicEnv =
       bunfigContent.includes("env") &&
       (bunfigContent.includes("BUN_PUBLIC_*") ||
@@ -717,7 +723,7 @@ async function updateNextjsProject(context: InitContext): Promise<void> {
   const openNextConfig = await resolveFile("open-next.config");
 
   if (nextConfig.exists) {
-    const fileContent = await fs.readFile(nextConfig.path, "utf-8");
+    const fileContent = await readFile(nextConfig.path, "utf-8");
     let updated = fileContent;
     if (
       !fileContent.includes(
@@ -729,9 +735,9 @@ async function updateNextjsProject(context: InitContext): Promise<void> {
     if (!fileContent.includes("initOpenNextCloudflareForDev()")) {
       updated += "\ninitOpenNextCloudflareForDev();\n";
     }
-    await fs.writeFile(nextConfig.path, updated);
+    await writeFile(nextConfig.path, updated);
   } else {
-    await fs.writeFile(
+    await writeFile(
       nextConfig.path,
       `import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 import type { NextConfig } from "next";
@@ -748,7 +754,7 @@ initOpenNextCloudflareForDev();
   }
 
   if (!openNextConfig.exists) {
-    await fs.writeFile(
+    await writeFile(
       openNextConfig.path,
       `import { defineCloudflareConfig } from "@opennextjs/cloudflare";
 
@@ -762,7 +768,7 @@ export default defineCloudflareConfig({
 `,
     );
   }
-  await fs.writeFile(
+  await writeFile(
     resolve(context.cwd, "./env.d.ts"),
     `// Auto-generated Cloudflare binding types.
 // @see https://alchemy.run/concepts/bindings/#type-safe-bindings
@@ -797,7 +803,7 @@ async function updateReactRouterProject(context: InitContext): Promise<{
   const wranglerJsonPath = resolve(context.cwd, "wrangler.json");
   const envTsPath = resolve(workersDir, "env.ts");
 
-  await fs.ensureDir(workersDir);
+  await ensureDir(workersDir);
 
   let main: string | undefined;
   if (await exists(wranglerJsonCPath)) {
@@ -807,7 +813,7 @@ async function updateReactRouterProject(context: InitContext): Promise<{
     const wranglerJson = await readJsonc(wranglerJsonPath);
     main = wranglerJson.main;
   } else {
-    await fs.writeFile(
+    await writeFile(
       resolve(workersDir, "app.ts"),
       `
       import { createRequestHandler } from "react-router";
@@ -837,7 +843,7 @@ export default {
     );
   }
 
-  await fs.writeFile(
+  await writeFile(
     envTsPath,
     `
     import type { website } from "../alchemy.run.ts";
@@ -1117,7 +1123,7 @@ function updateAdapterInConfig(configObject: Node): void {
 
 async function updateEnvFile(context: InitContext): Promise<void> {
   const envPath = resolve(context.cwd, ".env");
-  await fs.ensureFile(envPath);
+  await ensureFile(envPath);
 
   const envVars = ["ALCHEMY_PASSWORD=change-me"];
   if (context.framework === "rwsdk") {
@@ -1127,7 +1133,7 @@ async function updateEnvFile(context: InitContext): Promise<void> {
   let envContent = "";
   if (await exists(envPath)) {
     try {
-      envContent = await fs.readFile(envPath, "utf-8");
+      envContent = await readFile(envPath, "utf-8");
     } catch (error) {
       console.warn("Failed to read .env:", error);
     }
@@ -1147,7 +1153,7 @@ async function updateEnvFile(context: InitContext): Promise<void> {
 
   if (needsUpdate) {
     try {
-      await fs.writeFile(envPath, envContent, "utf-8");
+      await writeFile(envPath, envContent, "utf-8");
     } catch (error) {
       console.warn("Failed to update .env:", error);
     }

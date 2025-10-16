@@ -10,7 +10,7 @@ import {
   spinner,
   text,
 } from "@clack/prompts";
-import * as fs from "fs-extra";
+import { rm } from "fs-extra";
 import { resolve } from "pathe";
 import pc from "picocolors";
 import z from "zod";
@@ -250,7 +250,7 @@ async function removeExistingDirectory(context: ProjectContext): Promise<void> {
   s.start(`Removing existing directory: ${pc.yellow(context.path)}`);
 
   try {
-    await fs.rm(context.path, { recursive: true, force: true });
+    await rm(context.path, { recursive: true, force: true });
     s.stop(`Directory ${pc.yellow(context.path)} removed.`);
   } catch (error) {
     s.stop(pc.red(`Failed to remove directory ${pc.yellow(context.path)}.`));

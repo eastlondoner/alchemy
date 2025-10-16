@@ -11,7 +11,7 @@ Upload a dispute evidence file:
 
 ```ts
 import { File } from "alchemy/stripe";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 
 const disputeEvidence = await File("dispute-evidence", {
   file: await fs.readFile("./evidence.pdf"),
@@ -25,7 +25,7 @@ Upload an identity document:
 
 ```ts
 import { File } from "alchemy/stripe";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 
 const identityDocument = await File("identity-doc", {
   file: await fs.readFile("./passport.jpg"),
@@ -39,7 +39,7 @@ Upload a business logo with file link:
 
 ```ts
 import { File } from "alchemy/stripe";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 
 const businessLogo = await File("business-logo", {
   file: await fs.readFile("./logo.png"),
