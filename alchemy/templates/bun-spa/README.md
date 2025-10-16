@@ -21,7 +21,7 @@ import { getBackendUrl } from "alchemy/cloudflare/bun-spa";
 const apiBaseUrl = getBackendUrl();
 
 function backendUrl(path: string) {
-  return `${apiBaseUrl.protocol}${apiBaseUrl.host}${path}`;
+  return new URL(path, apiBaseUrl);
 }
 
 // Make API calls

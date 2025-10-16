@@ -85,6 +85,9 @@
         "noControlCharactersInRegex": "off",
         "noConfusingVoidType": "off"
       },
+      "nursery": {
+        "noMisusedPromises": "error"
+      },
       "style": {
         "useLiteralEnumMembers": "error",
         "useNodejsImportProtocol": "error",

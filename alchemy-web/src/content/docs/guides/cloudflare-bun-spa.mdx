@@ -55,11 +55,7 @@ bun init
 # Install Alchemy
 bun add -D alchemy
 
-# Create an alchemy.run.ts file
-touch alchemy.run.ts
-```
-
-Add the following to your `alchemy.run.ts`:
+# Create an `alchemy.run.ts` file:
 
 ```typescript
 import alchemy from "alchemy";
@@ -67,16 +63,19 @@ import { BunSPA, KVNamespace } from "alchemy/cloudflare";
 
 const app = await alchemy("my-bun-app");
 
-export const kv = await KVNamespace("kv", {
-  title: `${app.name}-${app.stage}-kv`,
-  adopt: true,
-});
+// declare additional cloudflare resources such as D1 databases or KV stores
+// export const kv = await KVNamespace("kv", {
+//   title: `${app.name}-${app.stage}-kv`,
+//   adopt: true,
+// });
 
 export const bunsite = await BunSPA("website", {
   entrypoint: "src/worker.ts", // Your backend entrypoint
   frontend: "src/index.html", // Your frontend HTML file(s)
   bindings: {
-    KV: kv,
+    // Add your bindings here
+    // e.g. KV: kv,
+    // e.g. D1: d1,
   },
 });
 
@@ -107,9 +106,25 @@ Add Alchemy scripts to your `package.json`:
 }
 ```
 
+Update your frontend API calls to use the `getBackendUrl` utility:
+
+```typescript
+import { getBackendUrl } from "alchemy/cloudflare/bun-spa";
+
+const apiBaseUrl = getBackendUrl();
+
+// Make API requests from frontend code
+
+fetch(`${apiBaseUrl}api/endpoint`)
+  .then(res => res.json())
+  .then(data => console.log(data));
+```
+
+
 :::tip
 Using `bun init` first gives you access to additional templates and configurations like Tailwind CSS and shadcn/ui support.
 :::
+
 
 ## Log in to Cloudflare
 
@@ -250,35 +265,9 @@ ALCHEMY_PASSWORD=change-me
 
 ### `alchemy.run.ts`
 
-```typescript
-/// <reference types="bun-types-no-globals" />
-
-import alchemy from "alchemy";
-import { BunSPA, KVNamespace } from "alchemy/cloudflare";
-
-const app = await alchemy("my-bun-app");
-
-export const kv = await KVNamespace("kv", {
-  title: `${app.name}-${app.stage}-kv`,
-  adopt: true,
-});
-
-export const bunsite = await BunSPA("website", {
-  entrypoint: "src/worker.ts",
-  frontend: "src/index.html",
-  bindings: {
-    KV: kv,
-    API_KEY: alchemy.secret(process.env.API_KEY),
-  },
-});
-
-console.log({
-  url: bunsite.url,
-  apiUrl: bunsite.apiUrl,
-});
-
-await app.finalize();
-```
+`alchemy.run.ts` is your infrastructure as code with Alchemy.
+Alchemy commands such as `alchemy dev` and `alchemy deploy` use `alchemy.run.ts` as their entrypoint.
+Import types from `alchemy.run.ts` into your application code to get runtime types for Cloudflare Bindings.
 
 ### `bunfig.toml`
 
@@ -293,40 +282,11 @@ env='BUN_PUBLIC_*'
 This configuration allows Bun to inline environment variables prefixed with `BUN_PUBLIC_` into your frontend code, making them accessible in the browser.
 :::
 
-### `types/env.d.ts`
-
-```typescript
-// Auto-generated Cloudflare binding types.
-// @see https://alchemy.run/concepts/bindings/#type-safe-bindings
-
-import type { bunsite } from "../alchemy.run.ts";
-
-export type CloudflareEnv = typeof bunsite.Env;
-
-declare module "cloudflare:workers" {
-  namespace Cloudflare {
-    export interface Env extends CloudflareEnv {}
-  }
-}
-```
 
 ### `tsconfig.json`
 
-The CLI updated the `tsconfig.json` to include `alchemy.run.ts` and register `@cloudflare/workers-types` + `bun-env.d.ts` globally
+`tsconfig.json` is created including `alchemy.run.ts` and registering `@cloudflare/workers-types` and `bun-env.d.ts` globally
 
-```json
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["@cloudflare/workers-types"],
-    "allowImportingTsExtensions": true,
-    "jsx": "react-jsx",
-    "noEmit": true
-  },
-  "include": ["bun-env.d.ts", "src/**/*.ts", "src/**/*.tsx"],
-  "references": [{ "path": "../../alchemy/tsconfig.json" }]
-}
-```
 
 ## How it works
 
@@ -356,8 +316,8 @@ import { getBackendUrl } from "alchemy/cloudflare/bun-spa";
 
 const apiBaseUrl = getBackendUrl();
 
-// Make API requests
-fetch(`${apiBaseUrl.protocol}${apiBaseUrl.host}/api/endpoint`)
+// Make API requests in your frontent
+fetch(new URL('api/request/path', apiBaseUrl))
   .then(res => res.json())
   .then(data => console.log(data));
 ```

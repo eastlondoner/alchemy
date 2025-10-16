@@ -10,7 +10,7 @@ export const dependencyVersionMap = {
   alchemy:
     process.env.NODE_ENV === "test"
       ? `file:${path.resolve(PKG_ROOT)}`
-      : getPackageVersion(),
+      : await getPackageVersion(),
 
   miniflare: "^4.20250617.3",
 

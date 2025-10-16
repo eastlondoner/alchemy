@@ -209,7 +209,7 @@ async function getInstallPreference(
 async function handleDirectoryOverwrite(
   context: ProjectContext,
 ): Promise<void> {
-  if (!fs.existsSync(context.path)) {
+  if (!(await fs.pathExists(context.path))) {
     return;
   }
 
@@ -248,9 +248,13 @@ async function handleDirectoryOverwrite(
 }
 
 async function detectExistingBunProject(projectPath: string): Promise<boolean> {
-  const bunfigExists = fs.existsSync(path.join(projectPath, "bunfig.toml"));
-  const bunLockExists = fs.existsSync(path.join(projectPath, "bun.lock"));
-  const bunEnvExists = fs.existsSync(path.join(projectPath, "bun-env.d.ts"));
+  const bunfigExists = await fs.pathExists(
+    path.join(projectPath, "bunfig.toml"),
+  );
+  const bunLockExists = await fs.pathExists(path.join(projectPath, "bun.lock"));
+  const bunEnvExists = await fs.pathExists(
+    path.join(projectPath, "bun-env.d.ts"),
+  );
 
   return bunfigExists || bunLockExists || bunEnvExists;
 }

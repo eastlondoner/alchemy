@@ -7,7 +7,7 @@ import reactLogo from "./assets/react.svg";
 const apiBaseUrl = getBackendUrl();
 
 function backendUrl(path: string) {
-  return `${apiBaseUrl.protocol}//${apiBaseUrl.host}${path}`;
+  return new URL(path, apiBaseUrl);
 }
 
 function App() {

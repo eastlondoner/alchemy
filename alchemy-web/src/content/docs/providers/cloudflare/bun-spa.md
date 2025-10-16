@@ -168,7 +168,7 @@ Use the `getBackendUrl` utility function from `alchemy/cloudflare/bun-spa` to ge
 import { getBackendUrl } from "alchemy/cloudflare/bun-spa";
 
 const apiBaseUrl = getBackendUrl();
-fetch(`${apiBaseUrl.protocol}${apiBaseUrl.host}/api/endpoint`);
+fetch(new URL('api/endpoint', apiBaseUrl));
 ```
 
 Under the hood, this uses the `BUN_PUBLIC_BACKEND_URL` environment variable in development, which is automatically set by Alchemy, and falls back to the current origin in production.

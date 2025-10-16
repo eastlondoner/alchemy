@@ -9,19 +9,7 @@ import reactLogo from "./assets/react.svg";
 const apiBaseUrl = getBackendUrl();
 
 function backendUrl(path: string) {
-  if(path.startsWith('/')) {
-    return `${apiBaseUrl.protocol}//${apiBaseUrl.host}${path}`;
-  }
-  // Handle relative paths, tbh this is not really necessary
-  const currentPathWithoutQuery = window.location.pathname.split('?')[0];
-  const pathDirs = currentPathWithoutQuery.split('/');
-  pathDirs.pop();  // we never want the 'filename'
-  while(path.startsWith('..')) {
-    pathDirs.shift();
-    pathDirs.shift();
-  }
-  const newPath = pathDirs.join('/');
-  return `${apiBaseUrl.protocol}//${apiBaseUrl.host}${newPath}${path}`;
+  return new URL(path, apiBaseUrl);
 }
 
 function fetchBackend(path: string, init?: Parameters<typeof fetch>[1]) {

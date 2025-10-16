@@ -226,9 +226,13 @@ async function detectFrameworkFromPackageJson(
 
 async function checkExistingAlchemyFiles(context: InitContext): Promise<void> {
   const alchemyFiles = ["alchemy.run.ts", "alchemy.run.js"];
-  const existingFile = alchemyFiles.find((file) =>
-    fs.pathExistsSync(resolve(context.cwd, file)),
-  );
+  let existingFile: string | undefined;
+  for (const file of alchemyFiles) {
+    if (await fs.pathExists(resolve(context.cwd, file))) {
+      existingFile = file;
+      break;
+    }
+  }
 
   if (existingFile) {
     const overwriteResult = await confirm({
@@ -651,10 +655,12 @@ async function updateNextjsProject(context: InitContext): Promise<void> {
     const candidates = ["ts", "js", "cjs", "mjs"].map((ext) =>
       resolve(context.cwd, `${name}.${ext}`),
     );
-    for (const candidate of candidates) {
-      if (await fs.pathExists(candidate)) {
-        return { path: candidate, exists: true };
-      }
+    const existenceChecks = await Promise.all(
+      candidates.map((candidate) => fs.pathExists(candidate)),
+    );
+    const foundIdx = existenceChecks.findIndex((exists) => exists);
+    if (foundIdx !== -1) {
+      return { path: candidates[foundIdx], exists: true };
     }
     return { path: candidates[0], exists: false };
   };

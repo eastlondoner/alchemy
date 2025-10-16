@@ -23,7 +23,7 @@ export async function copyTemplate(
 
   const templatePath = path.join(PKG_ROOT, "templates", templateName);
 
-  if (!fs.existsSync(templatePath)) {
+  if (!(await fs.pathExists(templatePath))) {
     throw new Error(`Template '${templateName}' not found at ${templatePath}`);
   }
 
@@ -105,7 +105,7 @@ async function updateTemplatePackageJson(
 ): Promise<void> {
   const packageJsonPath = join(context.path, "package.json");
 
-  if (!fs.existsSync(packageJsonPath)) {
+  if (!(await fs.pathExists(packageJsonPath))) {
     return;
   }
 
@@ -129,7 +129,7 @@ async function mergeBunSpaTemplate(context: ProjectContext): Promise<void> {
   try {
     // 1. Validate bunfig.toml exists or create it
     const bunfigPath = join(context.path, "bunfig.toml");
-    if (!fs.existsSync(bunfigPath)) {
+    if (!(await fs.pathExists(bunfigPath))) {
       // Create bunfig.toml with required config
       await fs.writeFile(bunfigPath, `[serve.static]\nenv='BUN_PUBLIC_*'\n`);
     } else {
@@ -155,24 +155,15 @@ async function mergeBunSpaTemplate(context: ProjectContext): Promise<void> {
     const alchemyRunSrc = join(templatePath, "alchemy.run.ts");
     const alchemyRunDest = join(context.path, "alchemy.run.ts");
 
-    if (fs.existsSync(alchemyRunSrc)) {
+    if (await fs.pathExists(alchemyRunSrc)) {
       let content = await fs.readFile(alchemyRunSrc, "utf8");
       content = content.replace("{projectName}", context.name);
       await fs.writeFile(alchemyRunDest, content);
     }
 
-    // 3. Copy types/env.d.ts for Cloudflare bindings
-    const envDtsSrc = join(templatePath, "types", "env.d.ts");
-    const envDtsDest = join(context.path, "types", "env.d.ts");
-
-    if (fs.existsSync(envDtsSrc)) {
-      await fs.ensureDir(path.dirname(envDtsDest));
-      await fs.copy(envDtsSrc, envDtsDest);
-    }
-
-    // 5. Update package.json scripts
+    // 3. Update package.json scripts
     const packageJsonPath = join(context.path, "package.json");
-    if (fs.existsSync(packageJsonPath)) {
+    if (await fs.pathExists(packageJsonPath)) {
       const packageJson = await fs.readJson(packageJsonPath);
 
       if (!packageJson.scripts) {
@@ -187,7 +178,7 @@ async function mergeBunSpaTemplate(context: ProjectContext): Promise<void> {
       await fs.writeJson(packageJsonPath, packageJson, { spaces: 2 });
     }
 
-    // 6. Add alchemy to devDependencies
+    // 4. Add alchemy to devDependencies
     await addPackageDependencies({
       devDependencies: ["alchemy"],
       projectDir: context.path,
@@ -195,7 +186,7 @@ async function mergeBunSpaTemplate(context: ProjectContext): Promise<void> {
 
     s.stop("Alchemy added to existing Bun project");
 
-    // 7. Install dependencies if requested
+    // 5. Install dependencies if requested
     if (context.options.install !== false) {
       const installSpinner = spinner();
       installSpinner.start("Installing dependencies...");
