@@ -577,6 +577,10 @@ export const Tunnel = Resource(
 
           tunnelData = existingTunnel;
 
+          // Sometimes the token is not returned by cloudflare
+          if (!tunnelData.token) {
+            tunnelData.token = await getTunnelToken(api, tunnelData.id);
+          }
           // Update configuration if provided
           if (
             (props.ingress || props.warpRouting || props.originRequest) &&
@@ -796,6 +800,12 @@ async function createTunnel(
 
   const data =
     (await response.json()) as CloudflareApiResponse<CloudflareTunnel>;
+
+  // sometimes the token is not returned by cloudflare
+  if (!data.result.token) {
+    data.result.token = await getTunnelToken(api, data.result.id);
+  }
+
   return data.result;
 }
 
@@ -917,4 +927,31 @@ export async function findTunnelByName(
 
   // No matching tunnel found
   return null;
+}
+
+/**
+ * Get tunnel token
+ */
+async function getTunnelToken(
+  api: CloudflareApi,
+  tunnelId: string,
+): Promise<string> {
+  const response = await api.get(
+    `/accounts/${api.accountId}/cfd_tunnel/${tunnelId}/token`,
+  );
+
+  if (!response.ok) {
+    logger.error(
+      `Failed to fetch token for tunnel ${tunnelId}: ${response.status} ${response.statusText}`,
+    );
+    await handleApiError(response, "get token", "tunnel", tunnelId);
+  }
+
+  const data = (await response.json()) as CloudflareApiResponse<string>;
+  if (!data.result) {
+    logger.warn(`Could not retrieve token for tunnel ${tunnelId}`);
+  } else {
+    logger.log(`Successfully fetched token for tunnel ${tunnelId}`);
+  }
+  return data.result;
 }
