@@ -494,6 +494,9 @@ export const Tunnel = Resource(
     const name =
       props.name ?? this.output?.name ?? this.scope.createPhysicalName(id);
 
+    // Track if we're replacing the tunnel (don't fetch token in this case)
+    let isReplacing = false;
+
     if (this.phase === "update" && this.output.name !== name) {
       console.log("replacing tunnel", this.output.name, name);
       this.replace(true);
@@ -577,10 +580,6 @@ export const Tunnel = Resource(
 
           tunnelData = existingTunnel;
 
-          // Sometimes the token is not returned by cloudflare
-          if (!tunnelData.token) {
-            tunnelData.token = await getTunnelToken(api, tunnelData.id);
-          }
           // Update configuration if provided
           if (
             (props.ingress || props.warpRouting || props.originRequest) &&
@@ -598,6 +597,12 @@ export const Tunnel = Resource(
           throw error;
         }
       }
+    }
+
+    // Ensure tunnel token is available (unless we're replacing)
+    // Sometimes Cloudflare doesn't return the token in the initial response
+    if (!isReplacing && !tunnelData.token) {
+      tunnelData.token = await getTunnelToken(api, tunnelData.id);
     }
 
     // Handle DNS records for ingress hostnames
@@ -800,12 +805,6 @@ async function createTunnel(
 
   const data =
     (await response.json()) as CloudflareApiResponse<CloudflareTunnel>;
-
-  // sometimes the token is not returned by cloudflare
-  if (!data.result.token) {
-    data.result.token = await getTunnelToken(api, data.result.id);
-  }
-
   return data.result;
 }
 
