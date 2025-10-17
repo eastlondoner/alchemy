@@ -566,7 +566,6 @@ export const Tunnel = Resource(
           (error.message.includes("already have a tunnel with this name") ||
             error.message.includes("already exists"))
         ) {
-          console.log(error);
           logger.log(`Tunnel '${name}' already exists, adopting it`);
 
           // Find the existing tunnel by name
