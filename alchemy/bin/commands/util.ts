@@ -10,7 +10,7 @@ import {
 import pc from "picocolors";
 import z from "zod";
 import { Profile, Provider } from "../../src/auth.ts";
-import { CancelSignal, loggedProcedure, t } from "../trpc.ts";
+import { CancelSignal, ExitSignal, loggedProcedure, t } from "../trpc.ts";
 import { promptForProfileName } from "./configure.ts";
 
 const createCloudflareToken = loggedProcedure
@@ -222,23 +222,36 @@ async function createCloudflareProfileToken(input: { profile?: string }) {
 
   const profile = await Profile.get(name);
   if (profile == null) {
-    throw new Error(`Profile ${pc.bold(name)} not found`);
+    outro(pc.red(`❌ Profile ${pc.bold(name)} not found`));
+    throw new ExitSignal(1);
   }
+  
   const { provider } = await Provider.getWithCredentials({
     profile: name,
     provider: "cloudflare",
+  }).catch(() => {
+    outro(pc.red(`❌ Failed to load Cloudflare provider for profile ${pc.bold(name)}`));
+    throw new ExitSignal(1);
   });
 
   if (provider.method !== "oauth") {
-    throw new Error(
-      `Profile ${pc.bold(name)} is not configured to use Cloudflare via OAuth`,
+    outro(
+      pc.red(
+        `❌ Profile ${pc.bold(name)} is not configured to use Cloudflare via OAuth\n` +
+        "Please run `alchemy configure` to set up OAuth for this profile."
+      )
     );
+    throw new ExitSignal(1);
   }
 
-  if (provider.scopes == null) {
-    throw new Error(
-      `Profile ${pc.bold(name)} is not configured with any Cloudflare scopes`,
+  if (!provider.scopes || provider.scopes.length === 0) {
+    outro(
+      pc.red(
+        `❌ Profile ${pc.bold(name)} is not configured with any Cloudflare scopes\n` +
+        "Please run `alchemy configure` to add the required scopes."
+      )
     );
+    throw new ExitSignal(1);
   }
 
   const permissionGroupIds: Array<string> = [];
