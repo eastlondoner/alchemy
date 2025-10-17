@@ -217,7 +217,18 @@ async function createCloudflareGodToken() {
 }
 
 async function createCloudflareProfileToken(input: { profile?: string }) {
-  const name = await promptForProfileName(input);
+  let name: string;
+  try {
+    name = await promptForProfileName(input);
+  } catch (error) {
+    if (error instanceof Error) {
+      outro(pc.red(`❌ ${error.message}`));
+    } else {
+      outro(pc.red('❌ Failed to get profile name'));
+    }
+    throw new ExitSignal(1);
+  }
+  
   intro(pc.cyan(`🧪 Create Cloudflare Token for ${pc.bold(name)}`));
 
   const profile = await Profile.get(name);
