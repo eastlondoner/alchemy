@@ -249,6 +249,18 @@ export const DevScript = Resource(
     let needsRestart = false;
 
     if (this.phase === "update" && this.output) {
+      switch (restartPolicy) {
+        case "always":
+          needsRestart = true;
+          break;
+        case "on-change":
+          needsRestart = this.output._restartSnapshot !== restartSnapshot;
+          break;
+        case "never":
+          break;
+        default:
+          exhaustivenessCheck(restartPolicy);
+      }
       if (restartPolicy === "always") {
         needsRestart = true;
       } else if (restartPolicy === "on-change") {
@@ -442,4 +454,8 @@ async function readLastLines(
   } catch {
     return "(unable to read log file)";
   }
+}
+
+function exhaustivenessCheck<T>(_value: T): never {
+  throw new Error(`Unhandled case: ${String(_value)}`);
 }

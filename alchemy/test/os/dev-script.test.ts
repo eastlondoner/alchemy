@@ -223,9 +223,7 @@ describe("DevScript Resource", { concurrent: false }, () => {
         const script = await DevScript("cwd-test", {
           script: 'bash -c "cat test.txt && sleep 1"',
           cwd: testDir,
-          extract: {
-            pattern: "test content",
-          },
+          extract: (line) => line.match(/test content/)?.[0],
           timeoutMs: 10_000,
         });
 
