@@ -27,3 +27,5 @@ smoke
 .wrangler
 
 *.tgz
+# SpecStory explanation file
+.specstory/.what-is-this.md
