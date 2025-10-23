@@ -24,11 +24,8 @@ export const worker = await Worker("api", {
 
 // Start a local monitoring dashboard that watches the worker
 export const dashboard = await DevScript("dashboard", {
-  script: `bun run src/dashboard.ts ${worker.url}`,
-  extract: {
-    pattern: "Dashboard running at (http://[^\\s]+)",
-    group: 1,
-  },
+  script: `bun run --hot src/dashboard.ts ${worker.url}`,
+  extract: (line) => line.match(/Dashboard running at (http:\/\/[^\s]+)/)?.[1],
   env: {
     WORKER_URL: worker.url,
     NODE_ENV: "development",

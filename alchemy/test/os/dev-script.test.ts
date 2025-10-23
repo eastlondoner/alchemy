@@ -21,9 +21,7 @@ describe("DevScript Resource", { concurrent: false }, () => {
       const script = await DevScript("url-test", {
         script:
           "bash -c \"sleep 1 && echo 'Server running at http://localhost:3000'\"",
-        extract: {
-          pattern: "http://[^\\s]+",
-        },
+        extract: (line) => line.match(/http:\/\/[^\s]+/)?.[0],
         timeoutMs: 10_000, // 10 second timeout for tests
       });
 
@@ -44,10 +42,7 @@ describe("DevScript Resource", { concurrent: false }, () => {
       const script = await DevScript("group-test", {
         script:
           "bash -c \"echo 'Local: http://localhost:5000 | Network: http://192.168.1.1:5000'\"",
-        extract: {
-          pattern: "Local:\\s+(http://[^\\s]+)",
-          group: 1,
-        },
+        extract: (line) => line.match(/Local:\s+(http:\/\/[^\s]+)/)?.[1],
         timeoutMs: 5_000,
       });
 
@@ -65,9 +60,7 @@ describe("DevScript Resource", { concurrent: false }, () => {
         // Script that never prints the expected pattern
         const scriptPromise = DevScript("timeout-test", {
           script: "bash -c \"sleep 5 && echo 'This will not match'\"",
-          extract: {
-            pattern: "NEVER_MATCHES",
-          },
+          extract: (line) => line.match(/NEVER_MATCHES/)?.[0],
           timeoutMs: 1_000, // 1 second timeout - should fire before script completes
         });
 
@@ -328,10 +321,7 @@ describe("DevScript Resource", { concurrent: false }, () => {
     try {
       const script = await DevScript("flags-test", {
         script: "bash -c \"echo 'URL: HTTPS://EXAMPLE.COM'\"",
-        extract: {
-          pattern: "https://[^\\s]+",
-          flags: "i", // Case insensitive
-        },
+        extract: (line) => line.match(/https:\/\/[^\s]+/i)?.[0], // Case insensitive
         timeoutMs: 5_000,
       });
 

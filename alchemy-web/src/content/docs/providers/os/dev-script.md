@@ -18,9 +18,7 @@ import { DevScript } from "alchemy/os";
 
 const server = await DevScript("dev-server", {
   script: "bun run dev",
-  extract: {
-    pattern: "http://[^\\s]+",
-  },
+  extract: (line) => line.match(/http:\/\/[^\s]+/)?.[0],
 });
 
 console.log("Server ready at:", server.extracted);
@@ -37,9 +35,7 @@ import { DevScript } from "alchemy/os";
 
 const dashboard = await DevScript("dashboard", {
   script: "vite dev",
-  extract: {
-    pattern: "https?://[^\\s]+",
-  },
+  extract: (line) => line.match(/https?:\/\/[^\s]+/)?.[0],
 });
 
 console.log("Dashboard URL:", dashboard.extracted);
@@ -54,9 +50,10 @@ import { DevScript } from "alchemy/os";
 
 const server = await DevScript("server", {
   script: "vite dev",
-  extract: {
-    pattern: "Local:\\s+(https?://[^\\s]+)",
-    group: 1, // Extract the first capture group
+  extract: (line) => {
+    // Extract the URL after "Local:"
+    const match = line.match(/Local:\s+(https?:\/\/[^\s]+)/);
+    return match?.[1]; // Return the first capture group
   },
 });
 
@@ -72,10 +69,7 @@ import { DevScript } from "alchemy/os";
 
 const api = await DevScript("api", {
   script: "node server.js",
-  extract: {
-    pattern: "ready at [^\\s]+",
-    flags: "i", // Case insensitive
-  },
+  extract: (line) => line.match(/ready at [^\s]+/i)?.[0], // Case insensitive with /i flag
 });
 ```
 
@@ -180,9 +174,7 @@ import { DevScript } from "alchemy/os";
 
 const fastServer = await DevScript("fast-server", {
   script: "bun run dev",
-  extract: {
-    pattern: "http://[^\\s]+",
-  },
+  extract: (line) => line.match(/http:\/\/[^\s]+/)?.[0],
   timeoutMs: 30_000, // 30 seconds
 });
 ```
@@ -208,10 +200,7 @@ const worker = await Worker("api", {
 // Start a local dashboard that monitors the worker
 const dashboard = await DevScript("dashboard", {
   script: `bun run dashboard --api-url ${worker.url}`,
-  extract: {
-    pattern: "Dashboard at (http://[^\\s]+)",
-    group: 1,
-  },
+  extract: (line) => line.match(/Dashboard at (http:\/\/[^\s]+)/)?.[1],
 });
 
 console.log("Worker URL:", worker.url);
@@ -317,13 +306,13 @@ const backend = await DevScript("backend", {
   script: "bun run backend",
   cwd: "./packages/backend",
   env: { PORT: "3001" },
-  extract: { pattern: "http://localhost:3001" },
+  extract: (line) => line.match(/http:\/\/localhost:3001/)?.[0],
 });
 
 const frontend = await DevScript("frontend", {
   script: `bun run frontend --api ${backend.extracted}`,
   cwd: "./packages/frontend",
-  extract: { pattern: "http://localhost:3000" },
+  extract: (line) => line.match(/http:\/\/localhost:3000/)?.[0],
 });
 
 console.log("Backend:", backend.extracted);
@@ -341,16 +330,13 @@ import { DevScript } from "alchemy/os";
 
 const postgres = await DevScript("postgres", {
   script: "docker-compose up postgres",
-  extract: {
-    pattern: "database system is ready to accept connections",
-  },
+  extract: (line) =>
+    line.match(/database system is ready to accept connections/)?.[0],
 });
 
 const migrate = await DevScript("migrate", {
   script: "bun run db:migrate",
-  extract: {
-    pattern: "Migration complete",
-  },
+  extract: (line) => line.match(/Migration complete/)?.[0],
 });
 ```
 
@@ -365,17 +351,10 @@ const migrate = await DevScript("migrate", {
 | `env` | `Record<string, string \| Secret>` | `undefined` | Environment variables (secrets auto-unwrapped) |
 | `processName` | `string` | First word of script | Process name for identification |
 | `quiet` | `boolean` | `false` | Suppress output mirroring to console |
-| `extract` | `DevScriptExtractConfig` | `undefined` | Extract pattern for readiness detection |
+| `extract` | `(line: string) => string \| undefined` | `undefined` | Extract function for readiness detection |
 | `restartOnUpdate` | `"on-change" \| "always" \| "never"` | `"on-change"` | Restart policy |
 | `timeoutMs` | `number` | `300000` (5 min) | Timeout for extraction in milliseconds |
 
-### DevScriptExtractConfig
-
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `pattern` | `string` | Required | Regular expression pattern to match |
-| `flags` | `string` | `undefined` | Regex flags (e.g., 'i' for case-insensitive) |
-| `group` | `number` | Auto | Capture group index (0=full match, 1+=groups) |
 
 ### DevScript Output
 

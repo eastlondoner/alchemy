@@ -5,29 +5,6 @@ import { Resource, ResourceKind } from "../resource.ts";
 import type { Secret } from "../secret.ts";
 
 /**
- * Extract configuration for parsing output
- */
-export interface DevScriptExtractConfig {
-  /**
-   * Regular expression pattern to match in the output
-   */
-  pattern: string;
-
-  /**
-   * Regular expression flags (e.g., 'i' for case-insensitive, 'g' for global)
-   * @default undefined
-   */
-  flags?: string;
-
-  /**
-   * Capture group index to extract (0 for full match, 1+ for groups)
-   * If not specified, uses group 1 if present, otherwise full match
-   * @default undefined
-   */
-  group?: number;
-}
-
-/**
  * Restart policy for the dev script
  */
 export type RestartPolicy = "on-change" | "always" | "never";
@@ -66,10 +43,17 @@ export interface DevScriptProps {
   quiet?: boolean;
 
   /**
-   * Extract configuration for parsing readiness from output
-   * When provided, the resource will block until the pattern is matched or timeout occurs
+   * Extract function for parsing readiness from output
+   * When provided, the resource will block until the function returns a value or timeout occurs
+   *
+   * @example
+   * // Extract a URL from output
+   * extract: (line) => {
+   *   const match = line.match(/http:\/\/[^\s]+/);
+   *   return match ? match[0] : undefined;
+   * }
    */
-  extract?: DevScriptExtractConfig;
+  extract?: (line: string) => string | undefined;
 
   /**
    * Restart policy when resource props change
@@ -157,9 +141,7 @@ export function isDevScript(resource: any): resource is DevScript {
  * // Start a dev dashboard that waits for a URL
  * const dashboard = await DevScript("dashboard", {
  *   script: "bun run dev",
- *   extract: {
- *     pattern: "https?://[^\\s]+",
- *   }
+ *   extract: (line) => line.match(/https?:\/\/[^\s]+/)?.[0],
  * });
  *
  * console.log("Dashboard ready at:", dashboard.extracted);
@@ -188,10 +170,7 @@ export function isDevScript(resource: any): resource is DevScript {
  * // Start a script with extraction timeout
  * const server = await DevScript("server", {
  *   script: "vite dev",
- *   extract: {
- *     pattern: "Local:\\s+(https?://[^\\s]+)",
- *     group: 1
- *   },
+ *   extract: (line) => line.match(/Local:\s+(https?:\/\/[^\s]+)/)?.[1],
  *   timeoutMs: 60000 // 1 minute timeout
  * });
  */
@@ -257,7 +236,10 @@ export const DevScript = Resource(
     const restartSnapshot = createRestartSnapshot({
       script: props.script,
       cwd: props.cwd,
-      env: normalizedEnv,
+      env: {
+        ...(process.env as Record<string, string>),
+        ...normalizedEnv,
+      },
       processName: props.processName,
       extract: props.extract,
     });
@@ -297,33 +279,17 @@ export const DevScript = Resource(
       return this.output;
     }
 
-    // Build extract function if provided
-    let extractFn: ((line: string) => string | undefined) | undefined =
-      undefined;
-    if (props.extract) {
-      const regex = new RegExp(props.extract.pattern, props.extract.flags);
-      const groupIndex = props.extract.group;
-      extractFn = (line: string) => {
-        const match = regex.exec(line);
-        if (match) {
-          if (groupIndex !== undefined) {
-            return match[groupIndex];
-          }
-          // Default: use group 1 if it exists, otherwise full match
-          return match.length > 1 ? match[1] : match[0];
-        }
-        return undefined;
-      };
-    }
-
     // Spawn the process
     const extracted = await this.scope.spawn(id, {
       cmd: props.script,
       cwd: props.cwd,
-      env: normalizedEnv,
+      env: {
+        ...(process.env as Record<string, string>),
+        ...normalizedEnv,
+      },
       processName: props.processName,
       quiet: props.quiet ?? false,
-      extract: extractFn,
+      extract: props.extract,
     });
 
     // Handle extraction timeout if extract was provided
@@ -383,7 +349,7 @@ function createRestartSnapshot(data: {
   cwd?: string;
   env: Record<string, string>;
   processName?: string;
-  extract?: DevScriptExtractConfig;
+  extract?: (line: string) => string | undefined;
 }): string {
   // Sort env keys for stable comparison
   const sortedEnv = Object.keys(data.env)
@@ -396,9 +362,7 @@ function createRestartSnapshot(data: {
     data.cwd ? `cwd=${data.cwd}` : "",
     sortedEnv ? `env:\n${sortedEnv}` : "",
     data.processName ? `processName=${data.processName}` : "",
-    data.extract
-      ? `extract:${data.extract.pattern}:${data.extract.flags ?? ""}:${data.extract.group ?? ""}`
-      : "",
+    data.extract ? `extract:${data.extract.toString()}` : "",
   ].filter(Boolean);
 
   return parts.join("\n");

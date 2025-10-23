@@ -39,10 +39,7 @@ const worker = await Worker("api", {
 // Start a development dashboard that monitors the worker
 const dashboard = await DevScript("dashboard", {
   script: `bun run dashboard --api-url ${worker.url}`,
-  extract: {
-    pattern: "Dashboard running at (http://[^\\s]+)",
-    group: 1,
-  },
+  extract: (line) => line.match(/Dashboard running at (http:\/\/[^\s]+)/)?.[1],
   env: {
     NODE_ENV: "development",
     API_KEY: alchemy.secret.env.API_KEY,
@@ -122,9 +119,7 @@ import { DevScript } from "alchemy/os";
 
 const database = await DevScript("database", {
   script: "docker-compose up postgres",
-  extract: {
-    pattern: "database system is ready",
-  },
+  extract: (line) => line.match(/database system is ready/)?.[0],
 });
 
 const backend = await DevScript("backend", {
@@ -132,16 +127,12 @@ const backend = await DevScript("backend", {
   env: {
     DATABASE_URL: "postgresql://localhost:5432/myapp",
   },
-  extract: {
-    pattern: "http://localhost:3001",
-  },
+  extract: (line) => line.match(/http:\/\/localhost:3001/)?.[0],
 });
 
 const frontend = await DevScript("frontend", {
   script: `bun run dev --api ${backend.extracted}`,
-  extract: {
-    pattern: "http://localhost:3000",
-  },
+  extract: (line) => line.match(/http:\/\/localhost:3000/)?.[0],
 });
 ```
 

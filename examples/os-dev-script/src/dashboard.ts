@@ -31,7 +31,7 @@ let errorCount = 0;
 async function pollWorker() {
   const start = Date.now();
   try {
-    const response = await fetch(WORKER_URL);
+    const response = await fetch(WORKER_URL!);
     const duration = Date.now() - start;
 
     logs.unshift({
@@ -83,7 +83,7 @@ const server = serve({
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Worker Dashboard</title>
+  <title>Dev Dashboard</title>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
@@ -202,8 +202,8 @@ const server = serve({
 </head>
 <body>
   <div class="container">
-    <h1>🎯 Worker Dashboard</h1>
-    <p class="subtitle">Monitoring Cloudflare Worker with Alchemy DevScript</p>
+    <h1>🎯 Dev Dashboard</h1>
+    <p class="subtitle">Monitoring Local Dev with Alchemy DevScript</p>
     
     <div class="worker-url">
       <strong>Worker URL:</strong> ${WORKER_URL}
