@@ -280,8 +280,6 @@ This ensures development tools don't run in production.
 DevScript delegates hot reloading to your tools:
 
 - **Bun**: `bun --hot` or `bun --watch`
-- **Vite**: Built-in HMR
-- **Next.js**: Fast Refresh
 - **Nodemon**: File watching
 
 DevScript's restart policies control when the entire process restarts, not file-level hot reloading.

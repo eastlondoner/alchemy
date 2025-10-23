@@ -128,7 +128,7 @@ export function isDevScript(resource: any): resource is DevScript {
  * Run a long-lived development script with lifecycle management
  *
  * DevScript is designed for running development servers, dashboards, and other
- * long-lived processes alongside `alchemy dev`. It provides:
+ * long-lived processes as part of `alchemy dev`. It provides:
  * - Automatic start/stop with Alchemy lifecycle
  * - Restart policies for handling prop changes
  * - Extract-based readiness detection with timeout

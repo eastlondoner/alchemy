@@ -3,7 +3,7 @@ title: DevScript
 description: Run long-lived development scripts with lifecycle management, restart policies, and readiness detection in local development mode.
 ---
 
-The DevScript resource is designed for running long-lived development servers, dashboards, and other processes alongside `alchemy dev`. It provides automatic start/stop with Alchemy lifecycle, restart policies for handling prop changes, and extract-based readiness detection.
+The DevScript resource is designed for running long-lived development servers, dashboards, and other processes as part of `alchemy dev`. It provides automatic start/stop with Alchemy lifecycle, restart policies for handling prop changes, and extract-based readiness detection.
 
 :::note
 DevScript only runs in local development mode (`alchemy dev` or `--local` flag). In production/CI environments, it returns metadata without spawning processes.
@@ -24,7 +24,23 @@ const server = await DevScript("dev-server", {
 console.log("Server ready at:", server.extracted);
 ```
 
-## Extract Patterns for Readiness
+## Using Extract
+
+If an extract function is provided, it is run on each line of the output until it returns a truthy value. The DevScript promise will resolve when the extract function is satisfied or
+a timeout occurs. The extract function allows for readiness detection or extracting a value from the function's stdout.
+
+### Readiness Detection
+
+Detect when the server is ready by checking for a specific string in the output:
+
+```ts
+import { DevScript } from "alchemy/os";
+
+const server = await DevScript("server", {
+  script: "bun run dev",
+  extract: (line) => line.includes("Server is ready"),
+});
+```
 
 ### Simple URL Extraction
 
@@ -39,38 +55,6 @@ const dashboard = await DevScript("dashboard", {
 });
 
 console.log("Dashboard URL:", dashboard.extracted);
-```
-
-### Capture Groups
-
-Use capture groups to extract specific parts of the output:
-
-```ts
-import { DevScript } from "alchemy/os";
-
-const server = await DevScript("server", {
-  script: "vite dev",
-  extract: (line) => {
-    // Extract the URL after "Local:"
-    const match = line.match(/Local:\s+(https?:\/\/[^\s]+)/);
-    return match?.[1]; // Return the first capture group
-  },
-});
-
-console.log("Local URL:", server.extracted);
-```
-
-### Case-Insensitive Matching
-
-Use regex flags for case-insensitive pattern matching:
-
-```ts
-import { DevScript } from "alchemy/os";
-
-const api = await DevScript("api", {
-  script: "node server.js",
-  extract: (line) => line.match(/ready at [^\s]+/i)?.[0], // Case insensitive with /i flag
-});
 ```
 
 ## Environment Variables and Secrets
@@ -209,19 +193,6 @@ console.log("Dashboard URL:", dashboard.extracted);
 await app.finalize();
 ```
 
-## Log and PID Management
-
-DevScript automatically manages logs and process IDs:
-
-- **Log file**: `.alchemy/logs/<id>.log` - Contains all stdout/stderr from the script
-- **PID file**: `.alchemy/pids/<id>.pid.json` - Contains the process ID for lifecycle management
-
-You can tail the log file to debug issues:
-
-```bash
-tail -f .alchemy/logs/dev-server.log
-```
-
 ## Restart Detection Table
 
 | Property Changed | on-change | always | never |
@@ -240,8 +211,6 @@ tail -f .alchemy/logs/dev-server.log
 DevScript delegates hot reloading to the underlying tool. For example:
 
 - **Bun**: Use `bun --hot` or `bun --watch`
-- **Vite**: Built-in HMR in dev mode
-- **Next.js**: Built-in Fast Refresh
 - **Nodemon**: Use `nodemon` to watch files
 
 DevScript's restart policy only controls when the entire process restarts due to Alchemy resource changes, not file changes within your app.
