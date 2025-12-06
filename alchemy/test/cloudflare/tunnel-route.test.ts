@@ -180,7 +180,7 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${originalId}`,
       );
       if (oldRouteResponse.ok) {
-        const oldRoute = (await oldRouteResponse.json()).result;
+        const oldRoute = (await oldRouteResponse.json() as { result: { deleted_at: string | null } }).result;
         expect(oldRoute.deleted_at).not.toBeNull();
       } else {
         expect(oldRouteResponse.status).toBe(404);
@@ -225,7 +225,7 @@ describe("TunnelRoute Resource", () => {
         );
       }
 
-      const existingRoute = (await createResponse.json()).result;
+      const existingRoute = (await createResponse.json() as { result: { id: string } }).result;
 
       // Now adopt it
       route = await TunnelRoute(`${testId}-adopt`, {
@@ -278,7 +278,7 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${routeId}`,
       );
       expect(routeResponse.ok).toBe(true);
-      let routeData = (await routeResponse.json()).result;
+      let routeData = (await routeResponse.json() as { result: { deleted_at: string | null } }).result;
       expect(routeData.deleted_at).toBeNull();
 
       // Destroy scope (should not delete route since delete: false)
@@ -299,7 +299,7 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${routeId}`,
       );
       expect(routeResponse.ok).toBe(true);
-      routeData = (await routeResponse.json()).result;
+      routeData = (await routeResponse.json() as { result: { deleted_at: string | null } }).result;
       expect(routeData.deleted_at).toBeNull(); // Should not be deleted
 
       // Clean up manually - delete route first, then tunnel can be deleted
@@ -329,7 +329,7 @@ async function assertRouteDeleted(api: CloudflareApi, routeId?: string) {
     );
     // Routes may return 200 even when deleted (soft delete), so check deleted_at
     if (response.ok) {
-      const route = (await response.json()).result;
+      const route = (await response.json() as { result: { deleted_at: string | null } }).result;
       expect(route.deleted_at).not.toBeNull();
     } else {
       expect(response.status).toBe(404);
