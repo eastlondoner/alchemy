@@ -63,6 +63,7 @@ export * from "./secrets-store.ts";
 export * from "./state.ts";
 export * from "./sveltekit/sveltekit.ts";
 export * from "./tanstack-start/tanstack-start.ts";
+export * from "./tunnel-route.ts";
 export * from "./tunnel.ts";
 export * from "./vectorize-index.ts";
 export * from "./vectorize-metadata-index.ts";
@@ -79,3 +80,4 @@ export * from "./worker.ts";
 export * from "./workflow.ts";
 export * from "./wrangler.json.ts";
 export * from "./zone.ts";
+
