@@ -1,4 +1,4 @@
-import { describe, expect } from "vitest";
+import { beforeEach, describe, expect } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
 import { createCloudflareApi } from "../../src/cloudflare/api.ts";
 import { WarpDeviceProfile } from "../../src/cloudflare/warp-device-profile.ts";
