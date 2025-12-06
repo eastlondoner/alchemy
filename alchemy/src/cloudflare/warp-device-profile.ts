@@ -416,6 +416,7 @@ export const WarpDeviceProfile = Resource(
  */
 interface CloudflarePolicyResponse {
   id: string;
+  policy_id?: string;
   name?: string;
   description?: string;
   match?: string;
@@ -431,6 +432,7 @@ interface CloudflarePolicyResponse {
  */
 interface CloudflarePolicyListItem {
   id: string;
+  policy_id?: string;
   name: string;
   description?: string;
   match?: string;
@@ -518,7 +520,10 @@ async function findPolicyByName(
   };
 
   const policy = data.result?.find((p) => p.name === name);
-  return policy ? { policy_id: policy.id } : null;
+  if (!policy) return null;
+  return {
+    policy_id: policy.policy_id ?? policy.id,
+  };
 }
 
 async function updateSplitTunnel(
