@@ -4,13 +4,14 @@ import {
   type CloudflareApi,
   createCloudflareApi,
 } from "../../src/cloudflare/api.ts";
-import { Tunnel } from "../../src/cloudflare/tunnel.ts";
+import { Tunnel, getTunnel } from "../../src/cloudflare/tunnel.ts";
 import {
   TunnelRoute,
   getTunnelRoute,
+  listTunnelRoutes,
 } from "../../src/cloudflare/tunnel-route.ts";
 import { destroy } from "../../src/destroy.ts";
-import { BRANCH_PREFIX } from "../util.ts";
+import { BRANCH_PREFIX, waitFor } from "../util.ts";
 // must import this or else alchemy.test won't exist
 import "../../src/test/vitest.ts";
 
@@ -251,20 +252,30 @@ describe("TunnelRoute Resource", () => {
     const api = await createCloudflareApi();
     let tunnel: any;
     let route: any;
+    const uniqueSuffix = Date.now().toString();
+    const tunnelResourceId = `${testId}-tunnel-no-delete-${uniqueSuffix}`;
+    const routeResourceId = `${testId}-no-delete-${uniqueSuffix}`;
 
     try {
       // Create a tunnel first
-      tunnel = await Tunnel(`${testId}-tunnel-no-delete`, {
-        name: `${testId}-tunnel-no-delete`,
+      tunnel = await Tunnel(tunnelResourceId, {
+        name: tunnelResourceId,
         adopt: true,
       });
 
+      // Ensure tunnel exists before creating route (Cloudflare can be eventual)
+      await waitFor(
+        async () => await getTunnel(api, tunnel.tunnelId),
+        () => true,
+        { timeoutMs: 5_000, intervalMs: 250 },
+      );
+
       // Create a route with delete: false
       // Use a unique network suffix to avoid conflicts
-      const networkSuffix5 = Math.abs(`${testId}-no-delete-${Date.now()}`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix5 = Math.abs(routeResourceId.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
       const network6 = `10.${networkSuffix5}.4.0/24`; // Use .4 instead of .3 to avoid conflicts
       
-      route = await TunnelRoute(`${testId}-no-delete`, {
+      route = await TunnelRoute(routeResourceId, {
         network: network6,
         tunnel: tunnel,
         delete: false,
@@ -318,6 +329,48 @@ describe("TunnelRoute Resource", () => {
     } catch (err) {
       console.error("Test error:", err);
       throw err;
+    }
+  });
+
+  test("route is attached to tunnel", async (scope) => {
+    const api = await createCloudflareApi();
+    let tunnel: any;
+    let route: any;
+
+    try {
+      // Create a tunnel
+      tunnel = await Tunnel(`${testId}-attach-tunnel`, {
+        name: `${testId}-attach-tunnel`,
+        adopt: true,
+      });
+
+      // Create a route for that tunnel
+      const networkSuffix = Math.abs(`${testId}-attach`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const network = `10.${networkSuffix}.5.0/24`;
+
+      route = await TunnelRoute(`${testId}-attach`, {
+        network,
+        tunnel,
+        comment: "Route should attach to tunnel",
+      });
+
+      // Fetch via API and confirm the route points to the tunnel
+      const apiRoute = await getTunnelRoute(api, route.id);
+      expect(apiRoute.tunnel_id).toBe(tunnel.tunnelId);
+      expect(apiRoute.network).toBe(network);
+
+      // Cross-check using the helper finder
+      const routes = await listTunnelRoutes(api, { limit: 50 });
+      const match = routes.find(
+        (r) => r.id === route.id && r.tunnel_id === tunnel.tunnelId && r.network === network,
+      );
+      expect(match).toBeDefined();
+    } catch (err) {
+      console.error("Test error:", err);
+      throw err;
+    } finally {
+      await destroy(scope);
+      await assertRouteDeleted(api, route?.id);
     }
   });
 });
