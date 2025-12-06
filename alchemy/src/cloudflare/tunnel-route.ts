@@ -1,4 +1,3 @@
-import { alchemy } from "../alchemy.ts";
 import type { Context } from "../context.ts";
 import { Resource, ResourceKind } from "../resource.ts";
 import { logger } from "../util/logger.ts";
@@ -12,7 +11,6 @@ import {
   type CloudflareApi,
   type CloudflareApiOptions,
 } from "./api.ts";
-import { extractCloudflareResult } from "./api-response.ts";
 import type { Tunnel } from "./tunnel.ts";
 
 /**
@@ -201,20 +199,6 @@ export const TunnelRoute = Resource(
 
     const routeId = props.routeId || this.output?.id;
     const adopt = props.adopt ?? this.scope.adopt;
-
-    if (this.scope.local) {
-      // Local development mode - return mock data
-      return {
-        id,
-        network: props.network,
-        tunnelId,
-        comment: props.comment,
-        virtualNetworkId: props.virtualNetworkId,
-        createdAt: new Date().toISOString(),
-        deletedAt: null,
-        type: "cloudflare::TunnelRoute",
-      };
-    }
 
     if (this.phase === "delete") {
       // For delete operations, check if the route ID exists in the output
