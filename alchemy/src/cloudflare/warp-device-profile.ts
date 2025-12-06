@@ -452,12 +452,7 @@ async function createPolicy(
   );
 
   if (!response.ok) {
-    await handleApiError(
-      response,
-      "create",
-      "warp_device_profile",
-      props.name,
-    );
+    await handleApiError(response, "create", "warp_device_profile", props.name);
   }
 
   return await extractCloudflareResult<CloudflarePolicyResponse>(
@@ -479,27 +474,20 @@ async function updatePolicy(
   );
 
   if (!response.ok) {
-    await handleApiError(
-      response,
-      "update",
-      "warp_device_profile",
-      policyId,
-    );
+    await handleApiError(response, "update", "warp_device_profile", policyId);
   }
 }
 
-async function deletePolicy(api: CloudflareApi, policyId: string): Promise<void> {
+async function deletePolicy(
+  api: CloudflareApi,
+  policyId: string,
+): Promise<void> {
   const response = await api.delete(
     `/accounts/${api.accountId}/devices/policy/${policyId}`,
   );
 
   if (!response.ok && response.status !== 404) {
-    await handleApiError(
-      response,
-      "delete",
-      "warp_device_profile",
-      policyId,
-    );
+    await handleApiError(response, "delete", "warp_device_profile", policyId);
   }
 }
 
@@ -507,15 +495,13 @@ async function findPolicyByName(
   api: CloudflareApi,
   name: string,
 ): Promise<{ policy_id: string } | null> {
-  const response = await api.get(
-    `/accounts/${api.accountId}/devices/policies`,
-  );
+  const response = await api.get(`/accounts/${api.accountId}/devices/policies`);
 
   if (!response.ok) {
     await handleApiError(response, "list", "warp_device_profile", "all");
   }
 
-  const data = await response.json() as {
+  const data = (await response.json()) as {
     result: CloudflarePolicyListItem[];
   };
 
@@ -628,4 +614,3 @@ function buildRequestBody(
 
   return requestBody;
 }
-

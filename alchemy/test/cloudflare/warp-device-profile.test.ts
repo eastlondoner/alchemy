@@ -62,7 +62,9 @@ describe("WarpDeviceProfile Resource", () => {
         `/accounts/${api.accountId}/devices/policy/${profile.policyId}`,
       );
       expect(getResponse.status).toEqual(200);
-      const data = (await getResponse.json()) as { result: { precedence: number } };
+      const data = (await getResponse.json()) as {
+        result: { precedence: number };
+      };
       expect(data.result.precedence).toEqual(1101);
     } finally {
       await alchemy.destroy(scope);
@@ -234,4 +236,3 @@ describe("WarpDeviceProfile Resource", () => {
     return data.result?.find((p) => p.name === name)?.id;
   }
 });
-

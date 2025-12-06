@@ -193,9 +193,7 @@ export const TunnelRoute = Resource(
 
     // Resolve tunnel ID from either string or Tunnel resource
     const tunnelId =
-      typeof props.tunnel === "string"
-        ? props.tunnel
-        : props.tunnel.tunnelId;
+      typeof props.tunnel === "string" ? props.tunnel : props.tunnel.tunnelId;
 
     const routeId = props.routeId || this.output?.id;
     const adopt = props.adopt ?? this.scope.adopt;
@@ -280,7 +278,10 @@ export const TunnelRoute = Resource(
           routeData = existingRoute;
 
           // Update comment/virtualNetworkId if provided
-          if (props.comment !== undefined || props.virtualNetworkId !== undefined) {
+          if (
+            props.comment !== undefined ||
+            props.virtualNetworkId !== undefined
+          ) {
             routeData = await updateRoute(api, existingRoute.id, {
               comment: props.comment,
               virtualNetworkId: props.virtualNetworkId,
@@ -492,4 +493,3 @@ async function updateRoute(
     (await response.json()) as CloudflareApiResponse<CloudflareRoute>;
   return data.result;
 }
-

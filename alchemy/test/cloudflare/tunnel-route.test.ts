@@ -37,9 +37,12 @@ describe("TunnelRoute Resource", () => {
 
       // Create a route with basic configuration
       // Use a deterministic but valid CIDR based on test ID hash
-      const networkSuffix = Math.abs(testId.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix =
+        Math.abs(
+          testId.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network = `10.${networkSuffix}.0.0/24`;
-      
+
       route = await TunnelRoute(testId, {
         network: network,
         tunnel: tunnel,
@@ -113,9 +116,14 @@ describe("TunnelRoute Resource", () => {
       });
 
       // Create a route using tunnel ID as string
-      const networkSuffix2 = Math.abs(`${testId}-string`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix2 =
+        Math.abs(
+          `${testId}-string`
+            .split("")
+            .reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network2 = `172.${networkSuffix2}.0.0/24`;
-      
+
       route = await TunnelRoute(`${testId}-string`, {
         network: network2,
         tunnel: tunnel.tunnelId, // Pass tunnel ID as string
@@ -155,9 +163,14 @@ describe("TunnelRoute Resource", () => {
       });
 
       // Create initial route
-      const networkSuffix3 = Math.abs(`${testId}-immutable`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix3 =
+        Math.abs(
+          `${testId}-immutable`
+            .split("")
+            .reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network3 = `192.${networkSuffix3}.0.0/24`;
-      
+
       route = await TunnelRoute(`${testId}-immutable`, {
         network: network3,
         tunnel: tunnel,
@@ -181,7 +194,11 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${originalId}`,
       );
       if (oldRouteResponse.ok) {
-        const oldRoute = (await oldRouteResponse.json() as { result: { deleted_at: string | null } }).result;
+        const oldRoute = (
+          (await oldRouteResponse.json()) as {
+            result: { deleted_at: string | null };
+          }
+        ).result;
         expect(oldRoute.deleted_at).not.toBeNull();
       } else {
         expect(oldRouteResponse.status).toBe(404);
@@ -208,9 +225,14 @@ describe("TunnelRoute Resource", () => {
       });
 
       // Create a route manually via API first
-      const networkSuffix4 = Math.abs(`${testId}-adopt`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix4 =
+        Math.abs(
+          `${testId}-adopt`
+            .split("")
+            .reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network5 = `10.${networkSuffix4}.2.0/24`;
-      
+
       const createResponse = await api.post(
         `/accounts/${api.accountId}/teamnet/routes`,
         {
@@ -226,7 +248,9 @@ describe("TunnelRoute Resource", () => {
         );
       }
 
-      const existingRoute = (await createResponse.json() as { result: { id: string } }).result;
+      const existingRoute = (
+        (await createResponse.json()) as { result: { id: string } }
+      ).result;
 
       // Now adopt it
       route = await TunnelRoute(`${testId}-adopt`, {
@@ -272,9 +296,14 @@ describe("TunnelRoute Resource", () => {
 
       // Create a route with delete: false
       // Use a unique network suffix to avoid conflicts
-      const networkSuffix5 = Math.abs(routeResourceId.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix5 =
+        Math.abs(
+          routeResourceId
+            .split("")
+            .reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network6 = `10.${networkSuffix5}.4.0/24`; // Use .4 instead of .3 to avoid conflicts
-      
+
       route = await TunnelRoute(routeResourceId, {
         network: network6,
         tunnel: tunnel,
@@ -289,7 +318,11 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${routeId}`,
       );
       expect(routeResponse.ok).toBe(true);
-      let routeData = (await routeResponse.json() as { result: { deleted_at: string | null } }).result;
+      let routeData = (
+        (await routeResponse.json()) as {
+          result: { deleted_at: string | null };
+        }
+      ).result;
       expect(routeData.deleted_at).toBeNull();
 
       // Destroy scope (should not delete route since delete: false)
@@ -310,19 +343,27 @@ describe("TunnelRoute Resource", () => {
         `/accounts/${api.accountId}/teamnet/routes/${routeId}`,
       );
       expect(routeResponse.ok).toBe(true);
-      routeData = (await routeResponse.json() as { result: { deleted_at: string | null } }).result;
+      routeData = (
+        (await routeResponse.json()) as {
+          result: { deleted_at: string | null };
+        }
+      ).result;
       expect(routeData.deleted_at).toBeNull(); // Should not be deleted
 
       // Clean up manually - delete route first, then tunnel can be deleted
-      await api.delete(`/accounts/${api.accountId}/teamnet/routes/${routeId}`).catch(() => {
-        // Ignore if already deleted
-      });
-      
-      // Manually delete tunnel since destroy failed due to routes
-      try {
-        await api.delete(`/accounts/${api.accountId}/cfd_tunnel/${tunnel.tunnelId}`).catch(() => {
+      await api
+        .delete(`/accounts/${api.accountId}/teamnet/routes/${routeId}`)
+        .catch(() => {
           // Ignore if already deleted
         });
+
+      // Manually delete tunnel since destroy failed due to routes
+      try {
+        await api
+          .delete(`/accounts/${api.accountId}/cfd_tunnel/${tunnel.tunnelId}`)
+          .catch(() => {
+            // Ignore if already deleted
+          });
       } catch (err) {
         // Ignore cleanup errors
       }
@@ -345,7 +386,12 @@ describe("TunnelRoute Resource", () => {
       });
 
       // Create a route for that tunnel
-      const networkSuffix = Math.abs(`${testId}-attach`.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0)) % 255;
+      const networkSuffix =
+        Math.abs(
+          `${testId}-attach`
+            .split("")
+            .reduce((acc, char) => acc + char.charCodeAt(0), 0),
+        ) % 255;
       const network = `10.${networkSuffix}.5.0/24`;
 
       route = await TunnelRoute(`${testId}-attach`, {
@@ -362,7 +408,10 @@ describe("TunnelRoute Resource", () => {
       // Cross-check using the helper finder
       const routes = await listTunnelRoutes(api, { limit: 50 });
       const match = routes.find(
-        (r) => r.id === route.id && r.tunnel_id === tunnel.tunnelId && r.network === network,
+        (r) =>
+          r.id === route.id &&
+          r.tunnel_id === tunnel.tunnelId &&
+          r.network === network,
       );
       expect(match).toBeDefined();
     } catch (err) {
@@ -382,11 +431,12 @@ async function assertRouteDeleted(api: CloudflareApi, routeId?: string) {
     );
     // Routes may return 200 even when deleted (soft delete), so check deleted_at
     if (response.ok) {
-      const route = (await response.json() as { result: { deleted_at: string | null } }).result;
+      const route = (
+        (await response.json()) as { result: { deleted_at: string | null } }
+      ).result;
       expect(route.deleted_at).not.toBeNull();
     } else {
       expect(response.status).toBe(404);
     }
   }
 }
-

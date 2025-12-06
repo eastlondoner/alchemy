@@ -109,9 +109,7 @@ describe("WarpDefaultProfile Resource", () => {
 
   async function assertDefaultProfileUpdated(): Promise<void> {
     const api = await createCloudflareApi();
-    const response = await api.get(
-      `/accounts/${api.accountId}/devices/policy`,
-    );
+    const response = await api.get(`/accounts/${api.accountId}/devices/policy`);
 
     expect(response.status).toEqual(200);
   }
@@ -120,12 +118,9 @@ describe("WarpDefaultProfile Resource", () => {
     mode: "include" | "exclude",
   ): Promise<void> {
     const api = await createCloudflareApi();
-    const response = await api.get(
-      `/accounts/${api.accountId}/devices/policy`,
-    );
+    const response = await api.get(`/accounts/${api.accountId}/devices/policy`);
     expect(response.status).toEqual(200);
 
     // The API may omit split tunnel fields; a 200 is sufficient for this check
   }
 });
-

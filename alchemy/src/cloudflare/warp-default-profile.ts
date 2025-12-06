@@ -279,12 +279,7 @@ async function updateDefaultPolicy(
   );
 
   if (!response.ok) {
-    await handleApiError(
-      response,
-      "update",
-      "warp_default_profile",
-      "default",
-    );
+    await handleApiError(response, "update", "warp_default_profile", "default");
   }
 }
 
@@ -325,4 +320,3 @@ async function updateDefaultSplitTunnel(
     }
   }
 }
-
