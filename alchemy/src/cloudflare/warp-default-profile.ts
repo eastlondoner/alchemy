@@ -1,7 +1,6 @@
 import type { Context } from "../context.ts";
 import { Resource, ResourceKind } from "../resource.ts";
 import { handleApiError } from "./api-error.ts";
-import { extractCloudflareResult } from "./api-response.ts";
 import {
   createCloudflareApi,
   type CloudflareApi,
@@ -208,50 +207,49 @@ interface CloudflareDefaultPolicyResponse {
   };
 }
 
+// Keys with special handling (not simple 1:1 mapping)
+type SpecialKeys = "serviceModeV2" | "splitTunnel" | "delete";
+
+// Simple device setting keys that map directly to snake_case API fields
+type SimpleDeviceSettingKey = Exclude<
+  keyof WarpDefaultProfileProps,
+  keyof CloudflareApiOptions | SpecialKeys
+>;
+
+// Type-safe mapping - TypeScript errors if any SimpleDeviceSettingKey is missing
+const DEVICE_SETTINGS_MAP: Record<SimpleDeviceSettingKey, string> = {
+  disableAutoFallback: "disable_auto_fallback",
+  allowModeSwitch: "allow_mode_switch",
+  switchLocked: "switch_locked",
+  tunnelProtocol: "tunnel_protocol",
+  autoConnect: "auto_connect",
+  allowedToLeave: "allowed_to_leave",
+  captivePortal: "captive_portal",
+  supportUrl: "support_url",
+  excludeOfficeIps: "exclude_office_ips",
+  lanAllowMinutes: "lan_allow_minutes",
+  lanAllowSubnetSize: "lan_allow_subnet_size",
+};
+
 async function updateDefaultPolicy(
   api: CloudflareApi,
   props: WarpDefaultProfileProps,
 ): Promise<void> {
-  // Build device settings object (includes split tunnel)
-  const deviceSettings: any = {};
+  // Build device settings object
+  const deviceSettings: Record<string, unknown> = {};
+
   if (props.serviceModeV2) {
     deviceSettings.service_mode_v2 = {
       mode: props.serviceModeV2.mode,
       ...(props.serviceModeV2.port && { port: props.serviceModeV2.port }),
     };
   }
-  if (props.disableAutoFallback !== undefined) {
-    deviceSettings.disable_auto_fallback = props.disableAutoFallback;
-  }
-  if (props.allowModeSwitch !== undefined) {
-    deviceSettings.allow_mode_switch = props.allowModeSwitch;
-  }
-  if (props.switchLocked !== undefined) {
-    deviceSettings.switch_locked = props.switchLocked;
-  }
-  if (props.tunnelProtocol !== undefined) {
-    deviceSettings.tunnel_protocol = props.tunnelProtocol;
-  }
-  if (props.autoConnect !== undefined) {
-    deviceSettings.auto_connect = props.autoConnect;
-  }
-  if (props.allowedToLeave !== undefined) {
-    deviceSettings.allowed_to_leave = props.allowedToLeave;
-  }
-  if (props.captivePortal !== undefined) {
-    deviceSettings.captive_portal = props.captivePortal;
-  }
-  if (props.supportUrl !== undefined) {
-    deviceSettings.support_url = props.supportUrl;
-  }
-  if (props.excludeOfficeIps !== undefined) {
-    deviceSettings.exclude_office_ips = props.excludeOfficeIps;
-  }
-  if (props.lanAllowMinutes !== undefined) {
-    deviceSettings.lan_allow_minutes = props.lanAllowMinutes;
-  }
-  if (props.lanAllowSubnetSize !== undefined) {
-    deviceSettings.lan_allow_subnet_size = props.lanAllowSubnetSize;
+
+  // Apply all simple field mappings
+  for (const propKey of Object.keys(
+    DEVICE_SETTINGS_MAP,
+  ) as SimpleDeviceSettingKey[]) {
+    deviceSettings[DEVICE_SETTINGS_MAP[propKey]] = props[propKey];
   }
 
   // Split tunnel config is part of the body for default policy
